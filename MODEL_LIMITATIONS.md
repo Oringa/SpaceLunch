@@ -30,6 +30,7 @@ CENTRIFUGE uses a reduced-order simulation. It is honest about what it does not 
 | Despin cradle, ballast release | Fictional game hardware | Not a description of any proprietary mechanism |
 | Material and hardware data | Representative handbook magnitudes and game values | Not certified design allowables |
 | Costs | Fictional game credits | Not a cost estimate |
+| Ground-track map | Solver latitude/longitude on the spherical Earth, drawn on Natural Earth layers simplified to about 1–2 km; land/sea/lake test against those polygons | A landing within a few km of a coast can be classified on the wrong side; no terrain, so "landing" is where the vehicle reaches the uniform site elevation. Only the vehicle is tracked: jettisoned stages and debris after a failure are not modelled |
 
 ## Reproducibility
 

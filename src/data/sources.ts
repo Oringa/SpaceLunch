@@ -18,6 +18,7 @@ export const SOURCES: SourceRef[] = [
   { key: 'R9', title: 'NASA, Basics of Space Flight, Chapter 3: Gravity & Mechanics', url: 'https://science.nasa.gov/learn/basics-of-space-flight/chapter3-1/', note: 'Two-body orbits, orbital elements, why a single ground impulse cannot produce a circular orbit.' },
   { key: 'R10', title: 'NASA Glenn, Ideal Rocket Equation', url: 'https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/ideal-rocket-equation/', note: 'dv = Isp g0 ln(m0/mf).' },
   { key: 'J77', title: 'L. H. Jorgensen, Prediction of Static Aerodynamic Characteristics for Slender Bodies Alone and with Lifting Surfaces to Very High Angles of Attack, NASA TR R-474, 1977', url: 'https://ntrs.nasa.gov/search?q=Jorgensen%20TR%20R-474', note: 'Form of the crossflow (high-angle) normal-force model; coefficients here are generic approximations.' },
+  { key: 'NE1', title: 'Natural Earth, free vector map data (public domain), via world-atlas 2.0.2, us-atlas 3.0.1 and natural-earth-vector v5.1.2', url: 'https://www.naturalearthdata.com/', note: 'Ground-track map: land, lakes, rivers, borders and populated places, simplified to about 1-2 km.' },
   { key: 'H1', title: 'Typical engineering handbook magnitudes (no single dataset)', url: '', note: 'Material densities, strengths and thermal properties are representative values, not certified allowables; uncertainty stated per preset.' },
 ];
 

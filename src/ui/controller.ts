@@ -16,7 +16,7 @@ import { designById } from '../data/designs';
 import { evaluateWithStars, missionById, recordKey, type MissionResult } from '../game/missions';
 
 export type Tab = 'build' | 'flight' | 'analysis';
-export type ViewKind = 'launcher' | 'world' | 'orbit';
+export type ViewKind = 'launcher' | 'world' | 'orbit' | 'map';
 
 export interface PredictionState {
   status: 'idle' | 'running' | 'done' | 'failed';
@@ -59,6 +59,8 @@ export interface AppState {
   showHome: boolean;
   /** Play mode: camera follows the action (launcher -> world -> orbit) until the player picks a view. */
   autoCamera: boolean;
+  /** Play mode: the full-screen ground-track map is open. */
+  mapOpen: boolean;
   /** Missions completed in this browser (any passing run). */
   completed: Record<string, number>;
   config: SimConfig;
@@ -161,6 +163,7 @@ export class Controller {
       uiMode: loadJSON<UiMode>(UIMODE_KEY) ?? 'play',
       showHome: true,
       autoCamera: true,
+      mapOpen: false,
       completed: loadJSON(COMPLETED_KEY) ?? {},
       config,
       configVersion: 1,
@@ -468,7 +471,9 @@ export class Controller {
 
   setUiMode(m: UiMode): void {
     saveJSON(UIMODE_KEY, m);
-    this.store.set({ uiMode: m });
+    // Play mode shows the map as an overlay, not as a camera view.
+    const view = m === 'play' && this.store.get().view === 'map' ? 'world' : this.store.get().view;
+    this.store.set({ uiMode: m, view, mapOpen: false });
   }
 
   /** Play mode: pick a mission (or sandbox) and load its tested design. */

@@ -45,12 +45,18 @@ export function App() {
         case '1': ctl.store.set({ view: 'launcher', autoCamera: false }); break;
         case '2': ctl.store.set({ view: 'world', autoCamera: false }); break;
         case '3': ctl.store.set({ view: 'orbit', autoCamera: false }); break;
+        case '4':
+        case 'm':
+        case 'M':
+          if (st.uiMode === 'play') ctl.store.set({ mapOpen: !st.mapOpen });
+          else ctl.store.set({ view: st.view === 'map' && e.key !== '4' ? 'world' : 'map' });
+          break;
         case 'e': case 'E': ctl.setUiMode(st.uiMode === 'play' ? 'engineer' : 'play'); break;
         case 'b': case 'B': ctl.store.set({ tab: 'build' }); break;
         case 'f': case 'F': ctl.store.set({ tab: 'flight' }); break;
         case 'a': case 'A': ctl.store.set({ tab: 'analysis' }); break;
         case '?': ctl.store.set({ helpOpen: true }); break;
-        case 'Escape': setDrawer(null); break;
+        case 'Escape': setDrawer(null); if (st.mapOpen) ctl.store.set({ mapOpen: false }); break;
       }
     };
     window.addEventListener('keydown', onKey);

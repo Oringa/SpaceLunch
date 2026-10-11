@@ -80,7 +80,7 @@ export function Help({ ctl }: { ctl: Controller }) {
       <h3>Keyboard</h3>
       <ul>
         <li><span className="kbd">L</span> launch · <span className="kbd">Space</span> play/pause · <span className="kbd">R</span> reset</li>
-        <li><span className="kbd">1</span> launcher view · <span className="kbd">2</span> world view · <span className="kbd">3</span> orbit view</li>
+        <li><span className="kbd">1</span> launcher view · <span className="kbd">2</span> world view · <span className="kbd">3</span> orbit view · <span className="kbd">4</span>/<span className="kbd">M</span> world map (ground track, landing point)</li>
         <li><span className="kbd">E</span> Play / Engineer mode · <span className="kbd">B</span>/<span className="kbd">F</span>/<span className="kbd">A</span> Build / Flight / Analysis · <span className="kbd">?</span> help · <span className="kbd">Esc</span> close</li>
       </ul>
       <h3>Information classes</h3>

@@ -28,6 +28,8 @@ test('Play mode: home → mission 1 → launch → results with stars', async ({
   await expect(page.locator('.dock')).toBeVisible();
   // The prediction comes from the prediction worker running the same solver.
   await expect(page.locator('.prediction-pill')).toContainText('Predicted', { timeout: 60_000 });
+  // The landing forecast on the mini-map comes from the same prediction.
+  await expect(page.locator('.minimap-cap')).toContainText(/Lands .* km E of the launch site/, { timeout: 30_000 });
   await page.screenshot({ path: 'test-results/play-dock.png' });
   await page.locator('.launch-btn').click();
   await expect(page.locator('.hud-banner')).toBeVisible();
@@ -39,7 +41,14 @@ test('Play mode: home → mission 1 → launch → results with stars', async ({
   await page.getByRole('button', { name: 'Skip to end' }).click();
   await expect(page.getByRole('dialog', { name: 'Results' })).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('.results-stars .big-star.on').first()).toBeVisible();
+  await expect(page.locator('.landing-line')).toContainText('Landed');
   await page.screenshot({ path: 'test-results/play-results.png' });
+  await page.getByRole('button', { name: 'See it on the map' }).click();
+  await expect(page.getByRole('dialog', { name: 'World map' })).toBeVisible();
+  await expect(page.locator('.map-overlay canvas')).toBeVisible();
+  await page.screenshot({ path: 'test-results/play-map.png' });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'World map' })).toBeHidden();
   // Mission 2 unlocked after passing Mission 1.
   await page.getByRole('button', { name: 'Next mission →' }).click();
   await expect(page.locator('.dock-mission')).toContainText('Mission 2');
@@ -53,7 +62,7 @@ test('Engineer mode: full panels, prediction, launch, analysis, views', async ({
   await expect(page.locator('.preflight').getByText(/Apogee|Orbit|✖/)).toBeVisible({ timeout: 60_000 });
   await page.getByRole('button', { name: '▶ Launch' }).click();
   await expect(page.locator('.clock .p')).toContainText(/Pump-down|Spin-up|Hold|Release|Free flight/, { timeout: 20_000 });
-  for (const v of ['World', 'Orbit', 'Launcher']) {
+  for (const v of ['World', 'Orbit', 'Map', 'Launcher']) {
     await page.getByRole('button', { name: v, exact: true }).click();
     await page.waitForTimeout(300);
     await page.screenshot({ path: `test-results/eng-view-${v.toLowerCase()}.png` });

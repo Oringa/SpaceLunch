@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { Controller } from '../controller';
 import { useStore } from '../store';
 import { createRenderer } from '../../rendering';
-import type { Renderer, RenderSource, ViewKind } from '../../rendering/types';
+import type { Renderer, RenderSource } from '../../rendering/types';
+import type { ViewKind } from '../controller';
+import { GroundMap } from '../map/GroundMap';
 import * as F from '../format';
 import { missionById } from '../../game/missions';
 
@@ -29,7 +31,8 @@ function makeSource(ctl: Controller, variant: 'engineer' | 'play'): RenderSource
     flown: () => (ctl.store.get().run.status === 'idle' ? null : ctl.flightTable),
     predicted: () => (ctl.store.get().overlays.predicted ? ctl.store.get().prediction.flight ?? null : null),
     ghosts: () => (ctl.store.get().overlays.ghosts ? ctl.store.get().ghosts.map((g) => ({ table: g.flight, color: g.color, label: g.label })) : []),
-    view: () => ctl.store.get().view,
+    // The map is drawn by the UI layer; the 3D renderer is paused behind it.
+    view: () => { const v = ctl.store.get().view; return v === 'map' ? 'world' : v; },
     overlays: () => ctl.store.get().overlays,
     cursorTime: () => ctl.store.get().cursorTime,
     reducedMotion: () => ctl.store.get().reducedMotion,
@@ -44,6 +47,7 @@ const VIEWS: Array<{ id: ViewKind; label: string; key: string; hint: string }> =
   { id: 'launcher', label: 'Launcher', key: '1', hint: 'Centrifuge cutaway: arm, vehicle, exit port' },
   { id: 'world', label: 'World', key: '2', hint: 'The launch seen from afar over the curved Earth' },
   { id: 'orbit', label: 'Orbit', key: '3', hint: 'Inertial view: osculating trajectory, apsides, target band' },
+  { id: 'map', label: 'Map', key: '4', hint: 'Ground track on a world map: landing point, range, nearby places' },
 ];
 
 export function SimulationView({ ctl, variant = 'engineer' }: { ctl: Controller; variant?: 'engineer' | 'play' }) {
@@ -52,6 +56,7 @@ export function SimulationView({ ctl, variant = 'engineer' }: { ctl: Controller;
   const overlays = useStore(ctl.store, (s) => s.overlays);
   const run = useStore(ctl.store, (s) => s.run);
   const missionId = useStore(ctl.store, (s) => s.missionId);
+  const mapOpen = useStore(ctl.store, (s) => s.mapOpen);
   const host = useRef<HTMLDivElement>(null);
   const renderer = useRef<Renderer | null>(null);
   const [kind, setKind] = useState<string>('');
@@ -67,8 +72,14 @@ export function SimulationView({ ctl, variant = 'engineer' }: { ctl: Controller;
     };
   }, [ctl, variant]);
   useEffect(() => {
-    renderer.current?.resetCamera();
+    if (view !== 'map') renderer.current?.resetCamera();
   }, [view]);
+  // Pause the 3D renderer while the map covers it.
+  const covered = (variant === 'engineer' && view === 'map') || (variant === 'play' && mapOpen);
+  useEffect(() => {
+    if (covered) renderer.current?.stop();
+    else renderer.current?.start();
+  }, [covered]);
   const snap = ctl.snapshot;
   const rel = run.summary?.release?.t;
   const relT = snap?.vehicle ? (rel ?? (ctl.flightTable.length ? ctl.flightTable.get('t', 0) : undefined)) : undefined;
@@ -77,14 +88,15 @@ export function SimulationView({ ctl, variant = 'engineer' }: { ctl: Controller;
   const mission = missionId ? missionById(missionId) : null;
   return (
     <div className="main">
-      <div className="renderer-host" ref={host} aria-label={`Simulation view: ${view}`} role="img" />
+      <div className="renderer-host" ref={host} aria-label={`Simulation view: ${view}`} role="img" style={covered ? { visibility: 'hidden' } : undefined} />
+      {variant === 'engineer' && view === 'map' && <div className="map-view"><GroundMap ctl={ctl} /></div>}
       {variant === 'engineer' && <><div className="view-toolbar">
         <div className="seg" role="group" aria-label="View">
           {VIEWS.map((v) => (
             <button key={v.id} aria-pressed={view === v.id} onClick={() => ctl.store.set({ view: v.id })} title={`${v.hint} (${v.key})`}>{v.label}</button>
           ))}
         </div>
-        <button className="btn small" onClick={() => renderer.current?.resetCamera()} title="Re-centre camera">⌖ camera</button>
+        {view !== 'map' && <button className="btn small" onClick={() => renderer.current?.resetCamera()} title="Re-centre camera">⌖ camera</button>}
         <div className="seg" role="group" aria-label="Overlays">
           {([['forces', 'vectors'], ['atmosphere', 'atmosphere'], ['predicted', 'prediction'], ['ghosts', 'ghosts'], ['labels', 'labels']] as const).map(([k, l]) => (
             <button key={k} aria-pressed={overlays[k]} onClick={() => ctl.store.set({ overlays: { ...overlays, [k]: !overlays[k] } })}>{l}</button>
@@ -102,7 +114,7 @@ export function SimulationView({ ctl, variant = 'engineer' }: { ctl: Controller;
           ✖ {snap.failure.message}
         </div>
       )}
-      {inRelease && snap && (
+      {inRelease && snap && view !== 'map' && (
         <div className="release-inset chip" aria-live="off">
           <div className="faint" style={{ fontSize: 11 }}>RELEASE · physical clock (playback slowed; physics unchanged)</div>
           <div className="ms">{relT !== undefined ? `T${snap.t - relT >= 0 ? '+' : '−'}${F.num(Math.abs(snap.t - relT) * 1000, 2)} ms` : 'awaiting release'}</div>
@@ -111,11 +123,11 @@ export function SimulationView({ ctl, variant = 'engineer' }: { ctl: Controller;
           </div>
         </div>
       )}
-      <div className="view-legend chip">
+      {view !== 'map' && <div className="view-legend chip">
         <span><i style={{ background: '#ffb454' }} />flown (this run)</span>
         <span><i style={{ background: 'repeating-linear-gradient(90deg,#4cc9f0 0 5px,transparent 5px 9px)' }} />predicted (same solver)</span>
         <span className="faint">playback {F.rate(run.playback.rate)}{run.playback.auto ? ' auto' : ''}</span>
-      </div></>}
+      </div>}</>}
     </div>
   );
 }

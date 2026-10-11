@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Controller } from '../controller';
 import { useStore } from '../store';
 import { SimulationView } from '../components/SimulationView';
+import { LandingLine, MapOverlay, MiniMap } from '../map/PlayMap';
 import { MISSIONS, type MissionResult } from '../../game/missions';
 import { missionUnlocked, partUnlocked, totalStars, unlockHint, unlocksFor } from '../../game/progression';
 import { MOTOR_PRESETS, PROTECTION_PRESETS, UPPER_STAGE_STACKS, BEARING_PRESETS, BALANCE_PRESETS, PAYLOAD_PRESETS, RCS_PRESETS, ARM_MATERIALS } from '../../data/presets';
@@ -176,6 +177,7 @@ function DesignDock({ ctl }: { ctl: Controller }) {
       )}
       <div className="dock-foot">
         <div className={`prediction-pill ${pl.tone}`} aria-live="polite">{pl.tone === 'wait' ? '⏳' : pl.tone === 'ok' ? '✓' : '✖'} {pl.text}</div>
+        <button className="btn map-btn" onClick={() => ctl.store.set({ mapOpen: true })} title="World map: where it will land (M)">🗺 Map</button>
         <button className="launch-btn" disabled={!ok} onClick={() => ctl.launch()}>LAUNCH</button>
       </div>
     </div>
@@ -370,6 +372,7 @@ function FlightHud({ ctl }: { ctl: Controller }) {
           ))}
           <button aria-pressed={autoCam} onClick={() => ctl.store.set({ autoCamera: !autoCam })} title="Camera follows the action">Auto</button>
         </div>
+        <button className="btn" onClick={() => ctl.store.set({ mapOpen: true })} title="World map: ground track and landing point (M)">Map</button>
         <button className="btn danger" onClick={() => ctl.command('abort')}>Abort</button>
       </div>
     </>
@@ -446,6 +449,7 @@ function Results({ ctl, summary, result }: { ctl: Controller; summary: RunSummar
       )}
       {f && <p className="results-why">{f.message}</p>}
       {tip && <p className="results-tip">💡 {tip}</p>}
+      <LandingLine ctl={ctl} />
       <div className="results-stats">
         <Stat k="Highest point" v={F.km(summary.extrema.maxAltitude.value)} />
         <Stat k="Release speed" v={summary.release ? F.mps(summary.release.tipSpeed) : '—'} />
@@ -502,7 +506,9 @@ export function PlayShell({ ctl }: { ctl: Controller }) {
       </div>
       {showHome && !live && <Home ctl={ctl} />}
       {!showHome && !live && !finished && <DesignDock ctl={ctl} />}
+      {!showHome && !live && !finished && <MiniMap ctl={ctl} where="design" />}
       {live && <FlightHud ctl={ctl} />}
+      {live && <MiniMap ctl={ctl} where="flight" />}
       {(live || finished) && <Toasts ctl={ctl} />}
       {finished && (
         <div className="results-back">
@@ -510,6 +516,7 @@ export function PlayShell({ ctl }: { ctl: Controller }) {
           <button className="results-close" onClick={() => setDismissed(run.runId)} aria-label="Close results and look around">Look around ✕</button>
         </div>
       )}
+      <MapOverlay ctl={ctl} />
       <Inspector ctl={ctl} />
       <Help ctl={ctl} />
     </div>
