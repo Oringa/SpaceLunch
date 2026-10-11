@@ -11,7 +11,7 @@ import { Dopri5, IntegrationError, locateRoot } from '../physics/integrator';
 import { RS, rotorDerivative, controllerTorque, bearingTorque, gasTorque } from '../physics/rotor';
 import { pressureAt } from '../physics/vacuum';
 import {
-  vehiclePositionEcef, vehicleVelocityEcef, tunnelCoords, corridorClearance, radialUnit, tangentAt,
+  vehiclePositionEcef, vehicleVelocityEcef, tunnelCoords, exitClearance, radialUnit, tangentAt,
 } from '../physics/launcher';
 import { ecefToEci, eciToEcef, earthOmegaVec, groundDistance, earthAngle } from '../physics/frames';
 import { qFromBasis, qRotate, qRotateInv, qNormalize } from '../physics/quat';
@@ -796,7 +796,7 @@ export class Session {
     const r: Vec3 = [y[0], y[1], y[2]];
     const nose = add(r, scale(xb, mp.xcg));
     const tail = sub(r, scale(xb, mp.length - mp.xcg));
-    return corridorClearance(s.geometry, eciToEcef(nose, t, rot), eciToEcef(tail, t, rot), this.envelopeRadius);
+    return exitClearance(s.geometry, eciToEcef(nose, t, rot), eciToEcef(tail, t, rot), this.envelopeRadius).clearance;
   }
 
   private tunnelS(t: number, y: Float64Array, which: 'nose' | 'tail'): number {
@@ -1014,40 +1014,67 @@ export class Session {
     });
   }
 
+  private capsuleEcef(t: number, y: Float64Array): { nose: Vec3; tail: Vec3 } {
+    const s = this.s;
+    const rot = s.config.physics.earthRotation;
+    const mp = this.flight!.massProps(y);
+    const q = qNormalize([y[FS.QW], y[FS.QX], y[FS.QY], y[FS.QZ]]);
+    const xb = s.config.fidelity === 'engineering' ? qRotate(q, [1, 0, 0]) : unitVel(y, rot);
+    const r: Vec3 = [y[0], y[1], y[2]];
+    return { nose: eciToEcef(add(r, scale(xb, mp.xcg)), t, rot), tail: eciToEcef(sub(r, scale(xb, mp.length - mp.xcg)), t, rot) };
+  }
+
   private exitCollision(t: number, y: Float64Array): void {
-    // Predict the penetration depth by continuing a collision-free copy of the trajectory.
     const s = this.s;
     const fl = this.flight!;
+    const rel = this.releaseRecord!;
+    const g = s.geometry;
+    const cap = this.capsuleEcef(t, y);
+    const ex = exitClearance(g, cap.nose, cap.tail, this.envelopeRadius);
+    const contributing = [
+      { label: 'Release timing error', value: `${(rel.timingErrorS * 1e6).toFixed(1)} µs → direction error ${((rel.directionErrorRad * 180) / Math.PI).toFixed(3)}° (ω·Δt)` },
+      { label: 'Residual pitch rate', value: `${rel.residualPitchRate.toFixed(3)} rad/s (${s.release.mount.name})` },
+      { label: 'Aperture radius / envelope radius', value: `${(g.apertureRadius * 100).toFixed(0)} cm / ${(this.envelopeRadius * 100).toFixed(0)} cm` },
+      { label: 'Path to tunnel exit', value: `${g.sEnd.toFixed(1)} m` },
+    ];
+    if (ex.region === 'chamber') {
+      this.extrema.minClearance = { value: ex.clearance, t };
+      const r3: Vec3 = [y[0], y[1], y[2]];
+      const v = norm(sub([y[3], y[4], y[5]], cross(earthOmegaVec(s.config.physics.earthRotation), r3)));
+      this.fail({
+        kind: 'exit-collision', t, criterion: 'Swept vehicle envelope vs chamber wall', value: (rel.directionErrorRad * 180) / Math.PI, threshold: 0, unit: '° phase error',
+        message: `Exit clearance failed: vehicle envelope struck the chamber wall at t = ${((t - rel.t) * 1000).toFixed(2)} ms after release (${v.toFixed(0)} m/s relative to the ground). Release phase was ${((rel.directionErrorRad * 180) / Math.PI).toFixed(2)}° away from the exit port.`,
+        contributing,
+      });
+      return;
+    }
+    // Predict the port penetration depth with a collision-free copy of the trajectory through the tunnel.
     const saved = { ...fl.discrete };
-    const ghost = new Dopri5(FS.N, fl.deriv, { ...this.flightInt!.opts, atol: this.flightInt!.opts.atol });
+    const ghost = new Dopri5(FS.N, fl.deriv, { ...this.flightInt!.opts });
     ghost.reset(t, y, 1e-6);
-    let minC = this.clearanceAt(t, y);
+    let minC = ex.clearance;
     let tMin = t;
     const ys = new Float64Array(FS.N);
-    for (let i = 0; i < 20000; i++) {
+    const tMax = t + (3 * (g.sEnd + s.vehicle.length)) / Math.max(1, norm([y[3], y[4], y[5]]));
+    for (let i = 0; i < 20000 && ghost.t < tMax; i++) {
       const ta = ghost.t;
       ghost.step();
       for (let k = 1; k <= 4; k++) {
         const tt = ta + ((ghost.t - ta) * k) / 4;
         ghost.dense(tt, ys);
-        const c = this.clearanceAt(tt, ys);
+        const c2 = this.capsuleEcef(tt, ys);
+        const c = exitClearance(g, c2.nose, c2.tail, this.envelopeRadius).clearance;
         if (c < minC) { minC = c; tMin = tt; }
       }
-      if (this.tunnelS(ghost.t, ghost.y, 'tail') > s.geometry.sEnd) break;
+      if (this.tunnelS(ghost.t, ghost.y, 'tail') > g.sEnd) break;
     }
     fl.discrete = saved;
-    const rel = this.releaseRecord!;
     const pen = -minC;
     this.extrema.minClearance = { value: minC, t: tMin };
     this.fail({
       kind: 'exit-collision', t, criterion: 'Swept vehicle envelope vs exit tunnel', value: pen * 100, threshold: 0, unit: 'cm',
       message: `Exit clearance failed: predicted vehicle envelope intersects the port by ${(pen * 100).toFixed(1)} cm at t = ${((t - rel.t) * 1000).toFixed(2)} ms after release.`,
-      contributing: [
-        { label: 'Release timing error', value: `${(rel.timingErrorS * 1e6).toFixed(1)} µs → direction error ${((rel.directionErrorRad * 180) / Math.PI).toFixed(3)}° (ω·Δt)` },
-        { label: 'Residual pitch rate', value: `${rel.residualPitchRate.toFixed(3)} rad/s (${s.release.mount.name})` },
-        { label: 'Aperture radius / envelope radius', value: `${(s.geometry.apertureRadius * 100).toFixed(0)} cm / ${(this.envelopeRadius * 100).toFixed(0)} cm` },
-        { label: 'Path to tunnel exit', value: `${s.geometry.sEnd.toFixed(1)} m` },
-      ],
+      contributing,
     });
   }
 
@@ -1209,6 +1236,9 @@ export class Session {
       }
       return;
     }
+    // Exit-corridor clearance minimum at solver resolution: sample the step's
+    // dense output, then refine the bracketing minimum by golden-section search.
+    if (this.phase === 'corridor') this.refineClearanceMin(t0, integ.t);
     // Interior extrema sampling at solver resolution (atmospheric flight).
     if (this.flight!.discrete.environment === 'atmosphere' && this.s.config.physics.atmosphere && norm3(integ.y) - R_EARTH < 120_000) {
       integ.dense(0.5 * (t0 + integ.t), this.yTmp2);
@@ -1218,6 +1248,33 @@ export class Session {
     this.trackFlight(integ.t, integ.y);
     this.recordFlight(integ.t, integ.y, false);
     if (integ.t - this.lastCheckpoint > 60) this.checkpoint();
+  }
+
+  private refineClearanceMin(ta: number, tb: number): void {
+    const integ = this.flightInt!;
+    const y = this.yTmp2;
+    const f = (t: number): number => this.clearanceAt(t, integ.dense(t, y));
+    const n = 8;
+    let bi = 0, bv = Infinity;
+    const vals: number[] = [];
+    for (let k = 0; k <= n; k++) {
+      const v = f(ta + ((tb - ta) * k) / n);
+      vals.push(v);
+      if (v < bv) { bv = v; bi = k; }
+    }
+    if (!Number.isFinite(bv)) return;
+    let lo = ta + ((tb - ta) * Math.max(0, bi - 1)) / n;
+    let hi = ta + ((tb - ta) * Math.min(n, bi + 1)) / n;
+    const gr = (Math.sqrt(5) - 1) / 2;
+    let c = hi - gr * (hi - lo), d = lo + gr * (hi - lo);
+    let fc = f(c), fd = f(d);
+    for (let it = 0; it < 40 && hi - lo > 1e-9; it++) {
+      if (fc < fd) { hi = d; d = c; fd = fc; c = hi - gr * (hi - lo); fc = f(c); }
+      else { lo = c; c = d; fc = fd; d = lo + gr * (hi - lo); fd = f(d); }
+    }
+    const tm = fc < fd ? c : d;
+    const vm = Math.min(fc, fd, bv);
+    if (vm < this.extrema.minClearance.value) this.extrema.minClearance = { value: vm, t: vm === bv ? ta + ((tb - ta) * bi) / n : tm };
   }
 
   /** Update solver-resolution extrema. */

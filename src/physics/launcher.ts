@@ -129,3 +129,57 @@ export const altitudeOf = (p: Vec3): number => norm(p) - R_EARTH;
 
 /** Small-angle release direction error for a timing error dt at rotor rate omega (rad). */
 export const releaseDirectionError = (omega: number, dt: number): number => omega * dt;
+
+/**
+ * Clearance of one point (carrying an envelope radius) against the solid
+ * launcher geometry. The free space is the UNION of the chamber interior
+ * (disc of radius chamberRadius, depth chamberDepth) and the tunnel interior
+ * (cylinder of radius apertureRadius from slightly before the wall to sEnd);
+ * beyond the tunnel exit plane is open air. Positive = clear.
+ */
+export function pointClearance(g: LauncherGeometry, p: Vec3, envelopeRadius: number): { c: number; region: 'chamber' | 'tunnel' | 'air' } {
+  const rel = sub(p, g.hubEcef);
+  const ax = dot(rel, g.a);
+  const rho = norm(addScaled(rel, g.a, -ax));
+  const chamber = Math.min(g.chamberRadius - envelopeRadius - rho, g.chamberDepth / 2 - envelopeRadius - Math.abs(ax));
+  const tc = tunnelCoords(g, p);
+  if (tc.s > g.sEnd) return { c: Infinity, region: 'air' };
+  // The aperture is cut where the tunnel axis meets the curved wall at a grazing
+  // angle; the free cylinder therefore starts (2 r_ap + r_env) R_c / s_wall before it.
+  const lead = ((2 * g.apertureRadius + envelopeRadius) * g.chamberRadius) / Math.max(g.sWall, 0.1 * g.chamberRadius);
+  const tunnel = tc.s >= g.sWall - lead ? g.apertureRadius - envelopeRadius - tc.d : -Infinity;
+  const nearPort = tc.s >= g.sWall - lead && tc.d < 3 * g.apertureRadius;
+  if (chamber >= tunnel) return { c: chamber, region: nearPort && chamber < 0 ? 'tunnel' : 'chamber' };
+  return { c: tunnel, region: 'tunnel' };
+}
+
+/**
+ * Swept-capsule clearance (m) of the vehicle against chamber walls and exit
+ * tunnel: minimum over sample points along the capsule axis, always including
+ * the points where the axis crosses the tunnel entrance and exit planes (the
+ * tunnel distance is convex along a segment, so its maximum over the tunnel
+ * portion lies at those clip points or the capsule ends).
+ */
+export function exitClearance(g: LauncherGeometry, noseEcef: Vec3, tailEcef: Vec3, envelopeRadius: number): { clearance: number; region: 'chamber' | 'tunnel' | 'air' } {
+  const ns = tunnelCoords(g, noseEcef).s;
+  const ts = tunnelCoords(g, tailEcef).s;
+  const us = [0, 0.25, 0.5, 0.75, 1];
+  const ds = ns - ts;
+  if (Math.abs(ds) > 1e-12) {
+    for (const sp of [g.sWall, g.sEnd]) {
+      const u = (sp - ts) / ds;
+      if (u > 0 && u < 1) us.push(u, Math.max(0, u - 1e-9), Math.min(1, u + 1e-9));
+    }
+  }
+  let worst = Infinity;
+  let region: 'chamber' | 'tunnel' | 'air' = 'air';
+  for (const u of us) {
+    const p = add(tailEcef, scale(sub(noseEcef, tailEcef), u));
+    const pc = pointClearance(g, p, envelopeRadius);
+    if (pc.c < worst) {
+      worst = pc.c;
+      region = pc.region;
+    }
+  }
+  return { clearance: worst, region };
+}

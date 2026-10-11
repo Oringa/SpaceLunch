@@ -283,12 +283,7 @@ export function locateRoot(
     let c = (lo * fhi - hi * flo) / (fhi - flo);
     if (!(c > lo && c < hi) || it % 5 === 4) c = 0.5 * (lo + hi);
     const fc = g(c);
-    if (fc === 0) {
-      // Exactly on the surface: move just past it.
-      lo = c;
-      flo = fc;
-      break;
-    }
+    if (fc === 0) return c; // exactly on the surface
     if (fc * flo > 0) {
       lo = c; flo = fc;
       if (side === 1) fhi /= 2;
