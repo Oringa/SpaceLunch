@@ -15,16 +15,27 @@ npm ci              # pinned dependencies (package-lock.json)
 npm run dev         # http://localhost:5173
 ```
 
-The app opens on a tested easy preset (*Instrument hop*). Press **Launch** (or `L`): pump-down and spin-up are time-compressed automatically, the release slows down so you can watch the vehicle leave through the port, and the flight plays back with the physical clock always shown.
+The app opens in **Play mode** on a mission map. *Start here* loads a tested easy preset (Mission 1, *Instrument hop*). Press **LAUNCH** (or `L`). Pump-down and spin-up are time-compressed automatically, the release slows down so you can watch the vehicle leave through the port, and the camera then follows the flight over the curved Earth. Press `E` for **Engineer mode**: every parameter, live plots, the model inspector and the experiments.
 
 ## Build and deploy (static)
 
 ```bash
 npm run build            # type-check + production build into dist/
-npm run serve:subpath    # serves dist/ at http://127.0.0.1:4173/centrifuge/
+npm start                # production server: http://127.0.0.1:4173/centrifuge/ (PORT/BASE_PATH env)
 ```
 
 The build uses a **relative asset base** (`base: './'`), so the same `dist/` folder works unchanged at any sub-path, for example `https://alonoring.com/centrifuge/`. Copy the contents of `dist/` into a `centrifuge/` folder on any static host. There are no accounts, no simulation server, no paid APIs and no runtime data downloads. Serve it over HTTP(S); opening `index.html` from disk is not supported (module workers need an origin). To emit absolute URLs instead, build with `BASE_PATH=/centrifuge/ npm run build`.
+
+### Railway
+
+The repository is Railway-ready. `railway.json` builds with `npm run build` and starts `npm start`, a dependency-free Node server (`scripts/serve-subpath.mjs`) with these properties:
+
+- It serves `dist/` under `/centrifuge/`, binds Railway's `PORT`, and redirects `/` to `/centrifuge/`.
+- `/healthz` is the health check.
+- It compresses with brotli/gzip and caches hashed assets immutably.
+- It returns 400 for malformed URLs and confines file access to `dist/`.
+
+Deploy with **New Project → Deploy from GitHub repo**, then **Generate Domain**. For `centrifuge.alonoring.com`, add the custom domain in Railway and a `CNAME` in GoDaddy DNS. For the exact path `alonoring.com/centrifuge`, the main site proxies `/centrifuge/*` to this service, unchanged. Step-by-step instructions for each option, including GoDaddy cPanel and GitHub Pages, are in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 `.github/workflows/ci-pages.yml` type-checks, tests, builds and runs the browser tests. On `main` (or a manual dispatch) it deploys `dist/` to GitHub Pages once Pages is enabled with source "GitHub Actions".
 
@@ -75,12 +86,21 @@ e2e/         Playwright browser tests
 
 ## Playing
 
+**Play mode** is the default, game-first presentation.
+
+- A level map lists five missions that unlock in order; each awards up to three stars, Poly Bridge-style. Better parts unlock as you progress.
+- A design dock offers the eight big choices in plain language, a live verdict from the solver ("Predicted: mission passes"), and one LAUNCH button.
+- During flight a HUD shows the phase, progress, altitude, speed, g-force and nose temperature, with pop-ups for milestones. The camera follows the action: machine → world → orbit.
+- After each run a results card shows stars, a plain-language reason with a tip, unlocks, and *Launch again* / *Next mission*.
+
+Stars and unlocks change only goals and available parts, never the physics. **Engineer mode** (`E`) shows everything:
+
 - **Build** tab: eight primary controls (radius, target speed, elevation, payload mass, shape family, protection, upper stage, flight program), with live consequences under each, plus expandable detail and expert sections. Each control shows its unit, a provenance badge (LAW / REF / APPROX / GAME) and an ⓘ inspector with the formula, sources and assumptions. The preflight list and the live prediction use the same solver.
 - **Flight** tab: launcher cutaway (stroboscopic at high rpm, labelled), **World** view of the launch from afar over the curved Earth, and an **Orbit** view with the osculating trajectory, apsides and target band. Instruments show the limiting constraint. Synchronised telemetry plots share one time cursor with the 3D scene and the event log.
 - **Analysis** tab: failure autopsy (criterion, value vs threshold, time, contributing conditions, preceding data), mission objectives, solver-resolution peaks, energy and cost accounting, and ghost comparison of up to three runs. Experiments include counterfactual retry, the vacuum thought experiment, a constraint frontier and a seeded robustness batch with Wilson intervals.
 - **Missions**: clean release → 30 km on an energy budget → 40 kg above 100 km → validated LEO → optimise kg per credit with margins kept. Records are separated by model version, fidelity, physics toggles, uncertainty and release mode.
 
-Keyboard: `L` launch · `Space` play/pause · `R` reset · `1`/`2`/`3` views · `B`/`F`/`A` tabs · `?` help.
+Keyboard: `L` launch · `Space` play/pause · `R` reset · `1`/`2`/`3` views · `E` Play/Engineer · `B`/`F`/`A` tabs · `?` help.
 
 ## Documents
 
@@ -92,4 +112,23 @@ Keyboard: `L` launch · `Space` play/pause · `R` reset · `1`/`2`/`3` views · 
 
 ## Verification log
 
-See the bottom of this file, updated at release time.
+Executed in the development container (Linux, Node 22.22, 4 vCPU) on 2026-10-11:
+
+| Check | Command | Result |
+|---|---|---|
+| Type-check | `npm run typecheck` | clean (TypeScript 5.9.3, strict) |
+| Unit and integration tests | `npm test` | **98 passed** in 11 files (Vitest 4.0.18) |
+| Numerical validation | `npm run validate` | see [docs/VALIDATION.md](docs/VALIDATION.md): ten-orbit energy drift 2.6e-10, angular-momentum drift 1.3e-10, radial apogee 210.3861 km, drag-decay error 1e-11, all 5 missions pass, all 10 failure cases fail as specified |
+| Production build | `npm run build` | `dist/` ≈ 315 KB gzip main bundle + 116 KB worker |
+| Browser tests | `npm run test:browser` | **3 passed**: Play flow (home → mission → launch → results with stars → next mission), Engineer flow (prediction, launch, views, analysis), invalid-configuration diagnostic. Served from `dist/` under `/centrifuge/`. |
+
+Browsers exercised: **Chromium 141 (Playwright build 1194) headless, with WebGL2 through SwiftShader software rendering**, at 1440×900 and 390×844. Not yet exercised: Firefox, Safari/WebKit, mobile browsers on real devices. The 60 fps target has **not** been measured on real GPU hardware; software rendering in the container is slower than a laptop GPU. Frame-rate profiling on a reference laptop is listed under deferred work.
+
+Simulation speed (same container): a full suborbital run, from pump-down to ground contact, solves in about 0.8–1.3 s. A full LEO run, including one validation orbit, solves in about 0.7–0.9 s.
+
+## Deferred / not in this release
+
+- Earth oblateness, terrain, ablation, chamber-opening gas flow, flexible bodies (see MODEL_LIMITATIONS.md).
+- Multiplayer, global leaderboards, factory management, other planets, cosmetic debris physics.
+- WebGPU/WebAssembly optimisation; real-GPU frame-rate profiling; Firefox/Safari test runs.
+- Checkpoint *resume* UI. Checkpoints are recorded, and exact replay from configuration, seed and command log is implemented and tested.
