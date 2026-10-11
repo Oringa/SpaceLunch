@@ -86,8 +86,13 @@ export class Track {
     this.haloMat?.resolution.set(w, h);
   }
 
-  /** Soft additive halo drawn with the same geometry (cheap glow, no post-processing). */
-  setHalo(on: boolean, width = 9, opacity = 0.16): void {
+  /**
+   * Soft additive halo drawn with the same geometry (cheap glow, no
+   * post-processing). A stencil test lets each pixel receive the halo once, so
+   * overlapping segments (dense telemetry rows) never accumulate into a solid
+   * band. Needs a stencil buffer (SceneManager enables it).
+   */
+  setHalo(on: boolean, width = 9, opacity = 0.2): void {
     if (on && !this.halo) {
       this.haloMat = new LineMaterial({
         color: this.material.color.getHex(),
@@ -97,6 +102,10 @@ export class Track {
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         worldUnits: false,
+        stencilWrite: true,
+        stencilRef: 1,
+        stencilFunc: THREE.NotEqualStencilFunc,
+        stencilZPass: THREE.ReplaceStencilOp,
       });
       this.haloMat.resolution.copy(this.material.resolution);
       this.halo = new LineSegments2(this.geom, this.haloMat);

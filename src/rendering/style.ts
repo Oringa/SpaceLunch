@@ -23,7 +23,8 @@ export const COLORS = {
 
 const STYLE_ID = 'cf-render-style';
 const CSS = `
-.cf-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.cf-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;container-type:inline-size}
+@container (max-width: 640px){.cf-caption{display:none !important}.cf-banner{font-size:11px;padding:4px 8px}}
 .cf-label{font:500 11px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;color:#e6edf3;
   background:rgba(13,17,23,.80);border:1px solid rgba(139,148,158,.35);border-radius:3px;padding:2px 6px;
   white-space:pre;pointer-events:none;letter-spacing:.02em;text-shadow:none}

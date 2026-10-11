@@ -418,7 +418,12 @@ export class OrbitView implements View {
         [r1 * (Math.cos(a) * P[0] + Math.sin(a) * Q[0]), r1 * (Math.cos(a) * P[1] + Math.sin(a) * Q[1]), r1 * (Math.cos(a) * P[2] + Math.sin(a) * Q[2])],
         this.bandLabel.position,
       );
-      setLabelText(this.bandLabel, `MISSION BAND\nperiapsis ≥ ${fmtKm(band.periapsisMin)}, apoapsis ≤ ${fmtKm(band.apoapsisMax)}`);
+      setLabelText(
+        this.bandLabel,
+        ctx.variant === 'play' || ctx.width < 640
+          ? `MISSION BAND ${fmtInt(band.periapsisMin / 1000)}–${fmtInt(band.apoapsisMax / 1000)} km`
+          : `MISSION BAND\nperiapsis ≥ ${fmtKm(band.periapsisMin)}, apoapsis ≤ ${fmtKm(band.apoapsisMax)}`,
+      );
     }
   }
 

@@ -164,8 +164,11 @@ export class LauncherView implements View {
   private resetPending = true;
   private height = 1;
   private tRelease = NaN;
+  private builtRc = NaN;
   private lights: Lights;
   private variant: 'engineer' | 'play' = 'engineer';
+  /** Short labels: 'play' variant or a narrow viewport. */
+  private compact = false;
   private insets: Insets = NO_INSETS;
   /** Fixed label texts: full (engineer) and short ('play'; null hides it). */
   private readonly labelTexts = new Map<CSS2DObject, { full: string; short: string | null }>();
@@ -509,16 +512,20 @@ export class LauncherView implements View {
     this.applyVariantText();
 
     this.scene.fog = new THREE.Fog(COLORS.background, Rc * 4, Rc * 14);
-    this.resetPending = true;
+    // Keep the user's camera across config edits unless the machine's scale changed a lot.
+    if (!(Math.abs(Rc - this.builtRc) <= 0.25 * this.builtRc)) {
+      this.builtRc = Rc;
+      this.resetPending = true;
+    }
   }
 
   private applyVariantText(): void {
-    for (const [l, t] of this.labelTexts) setLabelText(l, this.variant === 'play' ? t.short ?? t.full : t.full);
+    for (const [l, t] of this.labelTexts) setLabelText(l, this.compact ? t.short ?? t.full : t.full);
   }
 
   private labelShown(l: CSS2DObject, labelsOn: boolean): boolean {
     const t = this.labelTexts.get(l);
-    return labelsOn && !(this.variant === 'play' && t && t.short === null);
+    return labelsOn && !(this.compact && t && t.short === null);
   }
 
   // ------------------------------------------------------------------ frame
@@ -528,8 +535,12 @@ export class LauncherView implements View {
     if (ctx.variant !== this.variant) {
       this.variant = ctx.variant;
       styleLights(this.lights, this.variant);
-      this.applyVariantText();
       this.flownTrack.setHalo(this.variant === 'play');
+    }
+    const compact = ctx.variant === 'play' || ctx.width < 640;
+    if (compact !== this.compact) {
+      this.compact = compact;
+      this.applyVariantText();
     }
     if (sc !== this.scenario) {
       this.scenario = sc;

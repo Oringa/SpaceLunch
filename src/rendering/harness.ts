@@ -15,7 +15,7 @@
  *   fallback=1 forces the Canvas2D fallback; reduced=1 reduced motion;
  *   forces/atmo/pred/labels = 0 to switch overlays off; band=1 mission band.
  *   variant = engineer | play;  insets = top,bottom,left,right (CSS px);
- *   goal   = mission goal altitude in metres.
+ *   goal   = mission goal altitude in metres; cycle = ms between automatic view switches.
  */
 import { designById } from '../data/designs';
 import { buildScenario } from '../sim/build';
@@ -169,6 +169,13 @@ function currentT(): number | null {
   return Math.min(sum.times.end, tDisplay + ((performance.now() - wallStart) / 1000) * play);
 }
 
+const cycleMs = Number(q.get('cycle') ?? 0);
+const VIEWS: ViewKind[] = ['launcher', 'world', 'orbit'];
+function currentView(): ViewKind {
+  if (!cycleMs) return viewKind;
+  return VIEWS[(VIEWS.indexOf(viewKind) + Math.floor((performance.now() - wallStart) / cycleMs)) % 3];
+}
+
 let lastSnapT = NaN;
 let lastSnap: Snapshot | null = null;
 const source: RenderSource = {
@@ -186,7 +193,7 @@ const source: RenderSource = {
   flown: () => (tDisplay === null || flown.length === 0 ? null : flown),
   predicted: () => full,
   ghosts: () => ghosts,
-  view: () => viewKind,
+  view: () => currentView(),
   overlays: () => overlays,
   cursorTime: () => cursorTime,
   reducedMotion: () => reduced,

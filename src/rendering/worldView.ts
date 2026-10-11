@@ -29,10 +29,10 @@ import {
 
 const KM = 1e-3; // scene units per metre
 const SHELLS: Array<{ alt: number; label: string; short: string; color: string; strength: number }> = [
-  { alt: 11_000, label: '11 km · tropopause', short: '11 km', color: COLORS.shell, strength: 0.07 },
-  { alt: 50_000, label: '50 km · stratopause', short: '50 km', color: COLORS.shell, strength: 0.07 },
-  { alt: 86_000, label: '86 km · mesopause', short: '86 km', color: COLORS.shell, strength: 0.08 },
-  { alt: 100_000, label: '100 km · Kármán line', short: '100 km', color: COLORS.karman, strength: 0.12 },
+  { alt: 11_000, label: '11 km · tropopause', short: '11 km', color: COLORS.shell, strength: 0.05 },
+  { alt: 50_000, label: '50 km · stratopause', short: '50 km', color: COLORS.shell, strength: 0.05 },
+  { alt: 86_000, label: '86 km · mesopause', short: '86 km', color: COLORS.shell, strength: 0.06 },
+  { alt: 100_000, label: '100 km · Kármán line', short: '100 km', color: COLORS.karman, strength: 0.1 },
 ];
 const GOAL_COLOR = '#ffd166';
 const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -79,6 +79,8 @@ export class WorldView implements View {
   private readonly cursorRing = makeRing('#ffffff', 16);
   private scenario: Scenario | null = null;
   private siteKey = '';
+  private facKey = '';
+  private vehKey = '';
   private siteGround: Vec3 = [R_EARTH, 0, 0];
   private siteUp: Vec3 = [1, 0, 0];
   private launchH: Vec3 = [0, 1, 0];
@@ -89,6 +91,7 @@ export class WorldView implements View {
   private following: 'vehicle' | 'site' = 'site';
   private readonly lights: Lights;
   private variant: 'engineer' | 'play' = 'engineer';
+  private compact = false;
   private readonly vehicleGlow = makeGlow(COLORS.flown, 54);
   private readonly goalShell: THREE.Mesh;
   private readonly goalArc = new Track({ color: GOAL_COLOR, width: 2.4, opacity: 0.95, renderOrder: 7 });
@@ -112,7 +115,7 @@ export class WorldView implements View {
     this.overlay = new Overlay(overlayParent);
     this.proj.setScale(KM);
     this.lights = addLights(this.scene, new THREE.Vector3(0.3, 0.9, 0.5));
-    this.goalShell = new THREE.Mesh(new THREE.SphereGeometry(1, 192, 96), createShellMaterial(GOAL_COLOR, 0.2));
+    this.goalShell = new THREE.Mesh(new THREE.SphereGeometry(1, 192, 96), createShellMaterial(GOAL_COLOR, 0.07));
     this.goalShell.renderOrder = 2;
     this.scene.add(this.goalShell, this.goalArc.object, this.vehicleGlow);
 
@@ -166,6 +169,7 @@ export class WorldView implements View {
   }
 
   // ------------------------------------------------------------------ site
+  /** Site basis, cap and label (a basis change also resets the camera). */
   private rebuildSite(sc: Scenario): void {
     const g = sc.geometry;
     this.siteUp = normalize(g.hubEcef);
@@ -179,7 +183,22 @@ export class WorldView implements View {
     }
     this.cap = new THREE.Mesh(createSiteCap(this.siteUp, g.siteAltitude), this.earthMat);
     this.scene.add(this.cap);
-    // Facility: chamber disc and exit tunnel, drawn in the rotor plane at the hub.
+    const latDeg = (g.lat * 180) / Math.PI, lonDeg = (g.lon * 180) / Math.PI;
+    this.siteText = {
+      full: `LAUNCH SITE\n${fmtFixed(Math.abs(latDeg), 2)}°${latDeg >= 0 ? 'N' : 'S'} ${fmtFixed(Math.abs(lonDeg), 2)}°${lonDeg >= 0 ? 'E' : 'W'} · ${fmtInt(g.siteAltitude)} m`,
+      short: 'LAUNCH SITE',
+    };
+    setLabelText(this.siteLabel, this.compact ? this.siteText.short : this.siteText.full);
+    this.arcFrame.table = null;
+    this.arcFrame.len = -1;
+    this.arcRange = { a0: NaN, a1: NaN };
+    this.goalKey = '';
+    this.resetPending = true;
+  }
+
+  /** Facility: chamber disc and exit tunnel, drawn in the rotor plane at the hub. */
+  private rebuildFacility(sc: Scenario): void {
+    const g = sc.geometry;
     disposeTree(this.facility);
     this.site.remove(this.facility);
     this.facility = new THREE.Group();
@@ -197,20 +216,13 @@ export class WorldView implements View {
     lg.setAttribute('position', new THREE.Float32BufferAttribute([...local(t0), ...local(t1)], 3));
     this.facility.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: COLORS.release })));
     this.site.add(this.facility);
-    const latDeg = (g.lat * 180) / Math.PI, lonDeg = (g.lon * 180) / Math.PI;
-    this.siteText = {
-      full: `LAUNCH SITE\n${fmtFixed(Math.abs(latDeg), 2)}°${latDeg >= 0 ? 'N' : 'S'} ${fmtFixed(Math.abs(lonDeg), 2)}°${lonDeg >= 0 ? 'E' : 'W'} · ${fmtInt(g.siteAltitude)} m`,
-      short: 'LAUNCH SITE',
-    };
-    setLabelText(this.siteLabel, this.variant === 'play' ? this.siteText.short : this.siteText.full);
-    this.arcFrame.table = null;
-    this.arcFrame.len = -1;
-    this.arcRange = { a0: NaN, a1: NaN };
+  }
+
+  private rebuildVehicle(sc: Scenario): void {
     this.vehicle?.dispose();
     this.vehicle = new VehicleMesh(sc.vehicle);
     this.vehicleHolder.clear();
     this.vehicleHolder.add(this.vehicle.group);
-    this.resetPending = true;
   }
 
   // ------------------------------------------------------------------ camera
@@ -264,11 +276,22 @@ export class WorldView implements View {
     if (sc !== this.scenario) {
       this.scenario = sc;
       if (sc) {
-        const g = sc.geometry;
-        const key = `${g.lat}|${g.lon}|${g.azimuth}|${g.siteAltitude}|${g.chamberRadius}|${g.elevation}|${sc.vehicle.length}|${sc.vehicle.diameter}|${sc.vehicle.family.id}|${sc.vehicle.fins.id}`;
-        if (key !== this.siteKey) {
-          this.siteKey = key;
+        // Rebuild only what changed; only a new site/azimuth (scene basis) resets the camera.
+        const g = sc.geometry, v = sc.vehicle;
+        const siteKey = `${g.lat}|${g.lon}|${g.azimuth}|${g.siteAltitude}`;
+        const facKey = `${g.chamberRadius}|${g.elevation}|${g.armRadius}|${g.sWall}|${g.sEnd}`;
+        const vehKey = `${v.length}|${v.diameter}|${v.noseLength}|${v.noseRadius}|${v.family.id}|${v.fins.id}|${v.stackLength}|${v.stackDiameter}|${v.stages.length}`;
+        if (siteKey !== this.siteKey) {
+          this.siteKey = siteKey;
           this.rebuildSite(sc);
+        }
+        if (facKey !== this.facKey) {
+          this.facKey = facKey;
+          this.rebuildFacility(sc);
+        }
+        if (vehKey !== this.vehKey) {
+          this.vehKey = vehKey;
+          this.rebuildVehicle(sc);
         }
       }
     }
@@ -277,9 +300,13 @@ export class WorldView implements View {
       this.variant = ctx.variant;
       styleLights(this.lights, this.variant);
       this.flownTrack.setHalo(this.variant === 'play');
-      this.goalArc.setHalo(this.variant === 'play', 10, 0.2);
-      setLabelText(this.siteLabel, this.variant === 'play' ? this.siteText.short : this.siteText.full);
-      SHELLS.forEach((sh, i) => setLabelText(this.arcLabels[i], this.variant === 'play' ? sh.short : sh.label));
+      this.goalArc.setHalo(this.variant === 'play', 9, 0.18);
+    }
+    const compact = ctx.variant === 'play' || ctx.width < 640;
+    if (compact !== this.compact) {
+      this.compact = compact;
+      setLabelText(this.siteLabel, compact ? this.siteText.short : this.siteText.full);
+      SHELLS.forEach((sh, i) => setLabelText(this.arcLabels[i], compact ? sh.short : sh.label));
     }
     this.updateArcFrame(ctx, rotating);
     const snap = ctx.snap;
@@ -567,7 +594,7 @@ export class WorldView implements View {
     setDot(this.apoDot, _v);
     this.apoLabel.position.copy(_v);
     (this.apoDot.material as THREE.PointsMaterial).color.set(isPred ? COLORS.predicted : COLORS.flown);
-    setLabelText(this.apoLabel, `${isPred && this.variant !== 'play' ? 'predicted ' : ''}apogee ${fmtKm(t.get('alt', c.row))}`);
+    setLabelText(this.apoLabel, `${isPred && !this.compact ? 'predicted ' : ''}apogee ${fmtKm(t.get('alt', c.row))}`);
     this.apoDot.visible = true;
     this.apoLabel.visible = labels;
   }
