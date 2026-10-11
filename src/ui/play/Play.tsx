@@ -286,16 +286,19 @@ function Toasts({ ctl }: { ctl: Controller }) {
   const events = useStore(ctl.store, (s) => s.events);
   const [shown, setShown] = useState<Array<{ id: number; title: string; tone: string }>>([]);
   const seen = useRef(0);
+  const nextId = useRef(1);
   useEffect(() => {
     if (events.length < seen.current) seen.current = 0;
     const fresh = events.slice(seen.current);
     seen.current = events.length;
-    const add = fresh.filter((e) => TOAST_KINDS.has(e.kind) || e.severity === 'failure').filter((e) => !e.kind.startsWith('end:'));
-    if (!add.length) return;
-    const now = Date.now();
-    setShown((s) => [...s, ...add.map((e, i) => ({ id: now + i, title: e.severity === 'failure' ? `✖ ${e.label.split(':')[0]}` : (TOAST_TITLE[e.kind]?.(e) ?? e.label), tone: e.severity }))].slice(-4));
-    const t = setTimeout(() => setShown((s) => s.filter((x) => x.id < now)), 3500);
-    return () => clearTimeout(t);
+    const add = fresh.filter((e) => (TOAST_KINDS.has(e.kind) || e.severity === 'failure') && !e.kind.startsWith('end:'));
+    for (const e of add) {
+      const id = nextId.current++;
+      const title = e.severity === 'failure' ? `✖ ${e.label.split(':')[0]}` : (TOAST_TITLE[e.kind]?.(e) ?? e.label);
+      setShown((s) => [...s, { id, title, tone: e.severity }].slice(-3));
+      // Each toast owns its timer, so later events never cancel earlier removals.
+      setTimeout(() => setShown((s) => s.filter((x) => x.id !== id)), 3200);
+    }
   }, [events]);
   return (
     <div className="toasts" aria-live="polite">
@@ -327,7 +330,7 @@ function FlightHud({ ctl }: { ctl: Controller }) {
         {v ? (
           <>
             <Big label="Altitude" value={F.km(v.altitude, v.altitude < 10_000 ? 2 : 1)} />
-            <Big label="Speed" value={F.speed(v.vInertial)} />
+            {v.altitude < 100_000 ? <Big label="Speed (vs air)" value={F.speed(v.vAir)} /> : <Big label="Orbital speed" value={F.speed(v.vInertial)} />}
             <Big label="G-force felt" value={F.g(Math.hypot(v.axialG, v.lateralG))} />
             <Big label="Nose temperature" value={v.aeroshell ? F.kelvin(v.temps[0]) : '—'} />
           </>

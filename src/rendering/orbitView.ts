@@ -56,7 +56,7 @@ export class OrbitView implements View {
   private readonly ghostTracks = new Map<TelemetryTable, { track: Track; seen: boolean }>();
   private readonly apDot = makeDot('#f2cc60', 8);
   private readonly peDot = makeDot('#f2cc60', 8);
-  private readonly apLabel = makeLabel('', 'release', [0.5, 1.3]);
+  private readonly apLabel = makeLabel('', 'release', [1.08, 0.5]);
   private readonly peLabel = makeLabel('', 'release', [0.5, 1.3]);
   private readonly plane: THREE.Mesh;
   private readonly bandFill: THREE.Mesh;
@@ -64,7 +64,7 @@ export class OrbitView implements View {
   private readonly bandOuter = new Track({ color: COLORS.band, width: 1.4, opacity: 0.9 });
   private readonly bandLabel = makeLabel('', 'band', [0, 0.5]);
   private readonly vehicleDot = makeDot(COLORS.flown, 8);
-  private readonly vehicleLabel = makeLabel('', 'amber', [-0.1, 1.1]);
+  private readonly vehicleLabel = makeLabel('', 'amber', [-0.12, 0.5]);
   private readonly cursorRing = makeRing('#ffffff', 14);
   private readonly vehicleGlow = makeGlow(COLORS.flown, 40);
   private readonly goalRing = new Track({ color: '#ffd166', width: 1.8, opacity: 0.9, renderOrder: 4 });
@@ -170,7 +170,10 @@ export class OrbitView implements View {
     mS.addScaledVector(nS, -mS.dot(nS));
     if (mS.lengthSq() < 1e-8) mS.set(1, 0, 0);
     mS.normalize();
-    const tilt = (52 * Math.PI) / 180;
+    // Bound orbits: oblique view of the plane. Earth-intersecting arcs: nearly face-on with the
+    // arc just beyond the limb, i.e. seen in profile against space.
+    const profile = !!st && st.el.bound && st.el.intersectsEarth;
+    const tilt = ((profile ? -12 : 52) * Math.PI) / 180;
     const dir = nS.clone().multiplyScalar(Math.cos(tilt)).addScaledVector(mS, Math.sin(tilt)).normalize();
     const halfFov = (this.camera.fov * Math.PI) / 360;
     const { fx, fy } = usableFraction(this.width, this.height, ctx.insets);
@@ -259,12 +262,28 @@ export class OrbitView implements View {
       setDot(this.cursorRing, _v);
     }
 
+    this.declutter();
     const status = orbitStatus(st?.el ?? null, veh ? veh.altitude : null);
-    const source = st ? (st.live ? 'osculating elements of the current state' : 'from the prediction at its highest point') : '';
-    this.overlay.setCaption('ORBIT · inertial frame (ECI)', `${source}${source ? ' · ' : ''}camera ${fmtKm(camDist / KM - R_EARTH)} above surface`);
+    const source = st ? (st.live ? 'osculating, current state' : 'from prediction apex') : 'no trajectory';
+    this.overlay.setCaption('ORBIT · inertial (ECI)', `${source} · camera alt ${fmtKm(camDist / KM - R_EARTH)}`);
     if (snap?.failure) this.overlay.setBanner(`FAILURE — ${snap.failure.criterion}: ${snap.failure.message}`, 'warn');
     else this.overlay.setBanner(status.text, status.variant);
     this.overlay.setScale(null);
+  }
+
+  /** Hide the low-priority site label when it would collide with another label. */
+  private declutter(): void {
+    if (!this.siteLabel.visible) return;
+    const sp = _v.copy(this.siteLabel.position).project(this.camera);
+    const sx = sp.x * this.width * 0.5, sy = sp.y * this.height * 0.5;
+    for (const l of [this.vehicleLabel, this.apLabel, this.peLabel, this.goalLabel]) {
+      if (!l.visible) continue;
+      const p = _v.copy(l.position).project(this.camera);
+      if (Math.hypot(p.x * this.width * 0.5 - sx, p.y * this.height * 0.5 - sy) < 70) {
+        this.siteLabel.visible = false;
+        return;
+      }
+    }
   }
 
   private updateGhosts(ctx: FrameContext, map: RowMapper): void {

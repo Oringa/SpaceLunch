@@ -68,7 +68,8 @@ export class SceneManager implements Renderer {
     if (getComputedStyle(container).position === 'static') container.style.position = 'relative';
     this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, alpha: false, powerPreference: 'high-performance' });
     if (!this.renderer.capabilities.isWebGL2) throw new Error('WebGL2 context required');
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // 1.5x cap keeps MSAA affordable on laptop iGPUs; labels are HTML and stay crisp.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     this.renderer.setClearColor(COLORS.background, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     const canvas = this.renderer.domElement;

@@ -84,7 +84,7 @@ export function setLabelVariant(obj: CSS2DObject, variant: LabelVariant): void {
 }
 
 // ------------------------------------------------------------------ formatting
-export const fmtInt = (x: number): string => (Number.isFinite(x) ? Math.round(x).toLocaleString('en-US') : '—');
+export const fmtInt = (x: number): string => (Number.isFinite(x) ? (Math.round(x) || 0).toLocaleString('en-US') : '—');
 export const fmtFixed = (x: number, d = 1): string =>
   Number.isFinite(x) ? x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—';
 export function fmtKm(m: number): string {

@@ -61,7 +61,7 @@ export function mass(kg: number): string {
 }
 export const stress = (pa: number): string => (finite(pa) ? (Math.abs(pa) >= 1e9 ? `${num(pa / 1e9, 2)} GPa` : `${num(pa / 1e6, 0)} MPa`) : '—');
 export const flux = (w: number): string => (finite(w) ? (Math.abs(w) >= 1e6 ? `${num(w / 1e6, 2)} MW/m²` : `${num(w / 1e3, 1)} kW/m²`) : '—');
-export const g = (x: number): string => (finite(x) ? `${num(x, x >= 100 ? 0 : 2)} g` : '—');
+export const g = (x: number): string => (finite(x) ? `${Math.abs(x) < 0.005 ? '0.00' : num(x, x >= 100 ? 0 : 2)} g` : '—');
 export const deg = (rad: number, d = 1): string => (finite(rad) ? `${num((rad * 180) / Math.PI, d)}°` : '—');
 export const kelvin = (k: number): string => (finite(k) ? `${num(k, 0)} K` : '—');
 export const credits = (c: number): string => (finite(c) ? `${num(c, 0)} cr` : '—');
