@@ -14,7 +14,8 @@ import { MOTOR_PRESETS, PROTECTION_PRESETS, UPPER_STAGE_STACKS, BEARING_PRESETS,
 import { AERO_FAMILIES } from '../../physics/aero';
 import { PARAM_BY_PATH, fromDisplay, toDisplay } from '../../data/registry';
 import { getPath } from '../../sim/config';
-import { FAILURE_LABEL, type FailureKind, type RunSummary, type SimEvent } from '../../sim/session';
+import { FAILURE_LABEL, type FailureKind } from '../../sim/labels';
+import type { RunSummary, SimEvent } from '../../sim/session';
 import { Help, Inspector } from '../components/Modals';
 import * as F from '../format';
 

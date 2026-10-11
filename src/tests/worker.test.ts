@@ -183,3 +183,44 @@ describe('live run', () => {
     expect(b).toBeGreaterThan(1);
   });
 });
+
+describe('main-thread fallback when module workers are blocked', () => {
+  const waitFor = async (pred: () => boolean, ms = 60_000): Promise<void> => {
+    const t0 = Date.now();
+    while (!pred()) {
+      if (Date.now() - t0 > ms) throw new Error('timed out');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+
+  it('a worker that cannot be constructed falls back and replays buffered messages', async () => {
+    const { ResilientWorker } = await import('../workers/resilient');
+    const w = new ResilientWorker(() => {
+      throw new DOMException('blocked by policy', 'SecurityError');
+    });
+    const out: FromWorker[] = [];
+    w.onmessage = (e) => out.push(e.data);
+    // Sent before the fallback has loaded: must be buffered, not lost.
+    w.postMessage({ type: 'predict', jobId: 11, configVersion: 2, config: designById('instrument-hop') });
+    await waitFor(() => out.some((m) => m.type === 'prediction'));
+    const p = out.find((m) => m.type === 'prediction');
+    expect(w.mode).toBe('inline');
+    expect(p && p.type === 'prediction' && p.jobId === 11 && p.configVersion === 2).toBe(true);
+    expect(p && p.type === 'prediction' && p.summary.terminal).toBe('ground-contact');
+    w.terminate();
+  });
+
+  it('the inline host runs a live run to the end like the worker', async () => {
+    const { InlineWorker } = await import('../workers/inline');
+    const w = new InlineWorker();
+    const out: FromWorker[] = [];
+    w.onmessage = (e) => out.push(e.data);
+    w.postMessage({ type: 'init', runId: 5, configVersion: 1, config: designById('instrument-hop') });
+    w.postMessage({ type: 'skip-to', runId: 5, phase: 'end' });
+    await waitFor(() => out.some((m) => m.type === 'finished'));
+    const f = out.find((m) => m.type === 'finished');
+    expect(f && f.type === 'finished' && f.summary.terminal).toBe('ground-contact');
+    expect(out.some((m) => m.type === 'telemetry')).toBe(true);
+    w.terminate();
+  });
+});

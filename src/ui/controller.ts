@@ -9,6 +9,7 @@ import { cloneConfig, getPath, setPath } from '../sim/config';
 import { buildScenario, ConfigError, type BuildIssue, type Scenario } from '../sim/build';
 import type { FromWorker, PlaybackMode, PlaybackState, TelemetryBatch, ToWorker } from '../workers/protocol';
 import { LatestJobTracker } from '../workers/protocol';
+import { ResilientWorker, type WorkerLike } from '../workers/resilient';
 import type { CommandKind, RunSummary, SimEvent, Snapshot, TimedCommand } from '../sim/session';
 import { TelemetryTable, ROTOR_CHANNELS, FLIGHT_CHANNELS } from '../sim/telemetry';
 import { PREDICTION_CHANNELS } from '../workers/protocol';
@@ -137,8 +138,8 @@ const FLIGHT_SET = (sc: Scenario | null): string[] =>
 
 export class Controller {
   readonly store: Store<AppState>;
-  private live: Worker | null = null;
-  private predictor: Worker | null = null;
+  private live: WorkerLike | null = null;
+  private predictor: WorkerLike | null = null;
   private jobSeq = { n: 0 };
   private predictTracker = new LatestJobTracker(this.jobSeq);
   private batchTracker = new LatestJobTracker(this.jobSeq);
@@ -196,8 +197,9 @@ export class Controller {
   // ---------------------------------------------------------------- workers
   start(): void {
     if (this.live) return;
-    this.live = new Worker(new URL('../workers/simulation.worker.ts', import.meta.url), { type: 'module' });
-    this.predictor = new Worker(new URL('../workers/simulation.worker.ts', import.meta.url), { type: 'module' });
+    const make = (): Worker => new Worker(new URL('../workers/simulation.worker.ts', import.meta.url), { type: 'module' });
+    this.live = new ResilientWorker(make);
+    this.predictor = new ResilientWorker(make);
     this.live.onmessage = (e: MessageEvent<FromWorker>) => this.onLive(e.data);
     this.predictor.onmessage = (e: MessageEvent<FromWorker>) => this.onPredict(e.data);
     this.uiTimer = setInterval(() => {

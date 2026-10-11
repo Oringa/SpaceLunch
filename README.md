@@ -85,6 +85,7 @@ e2e/         Playwright browser tests
 - A second worker instance runs **predictions and experiment batches** cooperatively, so they are cancellable. Messages carry `runId`/`jobId` and `configVersion`, and stale results are rejected.
 - The **renderer** reads snapshots and telemetry each animation frame. It never writes physical state. Geometry is camera-relative (origins subtracted in double precision before Float32), with separate launcher, world and orbital views of the same state.
 - Neither `SharedArrayBuffer` nor cross-origin isolation is required.
+- If the host blocks module workers (a strict Content-Security-Policy, some sandboxed embeds, old browsers), the same worker host runs on the main thread instead. This fallback is a lazily loaded 20 KB chunk, and buffered messages are replayed. Verified in Chromium with `worker-src 'none'`: same results, with a smoother UI when workers are available.
 
 ## Playing
 
@@ -126,7 +127,7 @@ Executed in the development container (Linux, Node 22.22, 4 vCPU) on 2026-10-11:
 | Check | Command | Result |
 |---|---|---|
 | Type-check | `npm run typecheck` | clean (TypeScript 5.9.3, strict) |
-| Unit and integration tests | `npm test` | **108 passed** in 13 files (Vitest 4.0.18), including the production server and ground-track map tests |
+| Unit and integration tests | `npm test` | **110 passed** in 13 files (Vitest 4.0.18), including the production server, ground-track map and worker-fallback tests |
 | Numerical validation | `npm run validate` | see [docs/VALIDATION.md](docs/VALIDATION.md): ten-orbit energy drift 2.6e-10, angular-momentum drift 1.3e-10, radial apogee 210.3861 km, drag-decay error 1e-11, all 5 missions pass, all 10 failure cases fail as specified |
 | Production build | `npm run build` | `dist/` ≈ 326 KB gzip main bundle + 116 KB worker; the world map is a separate ≈ 197 KB gzip chunk, loaded only when a map is shown |
 | Browser tests | `npm run test:browser` | **3 passed**: Play flow (home → mission → landing forecast on the mini-map → launch → results with stars and landing point → full-screen map → next mission), Engineer flow (prediction, launch, launcher/world/orbit/map views, analysis), invalid-configuration diagnostic. Served from `dist/` under `/centrifuge/`. |
