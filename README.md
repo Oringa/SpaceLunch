@@ -117,7 +117,7 @@ Executed in the development container (Linux, Node 22.22, 4 vCPU) on 2026-10-11:
 | Check | Command | Result |
 |---|---|---|
 | Type-check | `npm run typecheck` | clean (TypeScript 5.9.3, strict) |
-| Unit and integration tests | `npm test` | **98 passed** in 11 files (Vitest 4.0.18) |
+| Unit and integration tests | `npm test` | **102 passed** in 12 files (Vitest 4.0.18), including the production server tests |
 | Numerical validation | `npm run validate` | see [docs/VALIDATION.md](docs/VALIDATION.md): ten-orbit energy drift 2.6e-10, angular-momentum drift 1.3e-10, radial apogee 210.3861 km, drag-decay error 1e-11, all 5 missions pass, all 10 failure cases fail as specified |
 | Production build | `npm run build` | `dist/` ≈ 315 KB gzip main bundle + 116 KB worker |
 | Browser tests | `npm run test:browser` | **3 passed**: Play flow (home → mission → launch → results with stars → next mission), Engineer flow (prediction, launch, views, analysis), invalid-configuration diagnostic. Served from `dist/` under `/centrifuge/`. |
