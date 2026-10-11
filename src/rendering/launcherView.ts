@@ -23,6 +23,7 @@ import { type Vec3, cross, rotZ, sub } from '../physics/vec3';
 import { Projection, disposeTree, eciRowsToEcef, hasTrajectory, pxPerUnit } from './projection';
 import { Track } from './track';
 import { VehicleMesh } from './vehicleMesh';
+import { BurstFx, type Collider, FailureClock, dustPuff, failureSeed, flightBurst, isQuietFailure } from './effects';
 import { COLORS, Overlay, fmtFixed, fmtInt, fmtKm, fmtLen, makeLabel, setLabelText, niceStep } from './style';
 import {
   type FrameContext, type Insets, type Lights, type View, MAIN_ONLY_LAYER, NO_INSETS, addLights, applyFraming, makeGlow, makeRing, setDot, styleLights, usableFraction,
@@ -33,9 +34,54 @@ const PHASE_NAME: Record<string, string> = {
   pumpdown: 'PUMP-DOWN', spinup: 'SPIN-UP', hold: 'HOLD (phase lock)', corridor: 'RELEASE · EXIT CORRIDOR', flight: 'FLIGHT', ended: 'ENDED',
 };
 
+/** Display coast-down time constant of the rotor after a failure (s, wall clock). */
+const COAST_TAU = 1.3;
+
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _v3 = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
+/**
+ * Failure being shown in the cutaway (wall-clock choreography; see BurstFx).
+ * Fragments released from the spinning rotor keep the velocity they had
+ * (omega x r, i.e. tangential) and fly straight; the real speeds would cross
+ * the chamber in milliseconds, so they are shown in slow motion.
+ */
+interface LauncherFailure {
+  kind: string;
+  /** No animation (reduced motion, or the machine was rebuilt mid-failure). */
+  still: boolean;
+  /** Displayed rotor angle when the failure was first seen. */
+  phi0: number;
+  /** Displayed rotor rate right after the failure (rad/s, decays with COAST_TAU). */
+  omegaEff: number;
+  /** Slow-motion factor (real / shown speed), for the engineer caption. */
+  slow: number | null;
+  vehicleGone: boolean;
+  /** Broken-off outer arm + cradle + vehicle flying as one rigid body. */
+  fling: { rcg: number; omega: number; hit: boolean } | null;
+  /** Rotor shudder amplitude (m) and duration (s). */
+  jitter: number;
+  jitterT: number;
+  /** Vehicle crumple (component-load). */
+  crumple: boolean;
+  /** Bearing sparks at the hub until this time (s). */
+  hubSparksUntil: number;
+  sparkAcc: number;
+  /** Scheduled spawns (wall-clock seconds since the failure). */
+  pending: Array<{ at: number; run: () => void }>;
+  /** 'flight': effect group at the vehicle, one unit per screen pixel. */
+  flightAnchor: THREE.Vector3 | null;
+  tumble: boolean;
+  heatUntil: number;
+  /** Start of the in-flight sequence (after any camera move), s. */
+  phaseStart: number;
+  /** Display gravity (m/s^2) for debris in the chamber. */
+  gD: number;
+}
 
 /** Solid arrow (shaft + head) of unit design, re-posed every frame. */
 class Arrow {
@@ -116,6 +162,40 @@ function circlePoints(r: number, z: number, n = 256, a0 = 0, a1 = Math.PI * 2): 
   return pts;
 }
 
+const VEHICLE_SHARDS = ['#e6edf3', '#d0d7de', '#aab3bd', '#8b949e'];
+const ARM_SHARDS = ['#9aa7b8', '#7d8a9c', '#b4bfcc'];
+const clamp = (x: number, lo: number, hi: number): number => (x < lo ? lo : x > hi ? hi : x);
+
+/** Velocity (scene) of point p on a rotor turning at w rad/s (clockwise seen from +Z, like phi). */
+function rotorVel(p: THREE.Vector3, w: number, out: THREE.Vector3): THREE.Vector3 {
+  return out.set(w * p.y, -w * p.x, 0);
+}
+
+/**
+ * Corner of a freed rigid piece (rotor coords, CG at (rcg, 0)) after the rotor
+ * would have turned by th: it keeps the rotor's angular rate and its CG moves
+ * along the tangent (no centripetal force any more).
+ */
+function flungCorner(rcg: number, x: number, y: number, th: number, out: THREE.Vector3): THREE.Vector3 {
+  const c = Math.cos(th), s = Math.sin(th);
+  const dx = x - rcg;
+  return out.set(rcg + c * dx + s * y, -th * rcg - s * dx + c * y, 0);
+}
+
+/** Rotor angle after which the first corner of a freed piece reaches radius lim. */
+function flingHitAngle(rcg: number, corners: Array<[number, number]>, lim: number): number {
+  for (let th = 0; th < 3; th += 0.005) {
+    for (const [x, y] of corners) if (flungCorner(rcg, x, y, th, _v4).lengthSq() >= lim * lim) return th;
+  }
+  return 1;
+}
+
+/** Two significant figures (caption numbers). */
+function niceRound(x: number): number {
+  const p = Math.pow(10, Math.max(0, Math.floor(Math.log10(Math.max(x, 1))) - 1));
+  return Math.round(x / p) * p;
+}
+
 function lineLoop(r: number, z: number, color: THREE.ColorRepresentation, opacity = 1): THREE.LineLoop {
   const pts: number[] = [];
   for (let i = 0; i < 192; i++) {
@@ -179,6 +259,48 @@ export class LauncherView implements View {
   private readonly insetDiv: HTMLDivElement;
   private readonly insetCaption: HTMLDivElement;
   private insetRect: { x: number; y: number; w: number; h: number } | null = null;
+  // Failure effects.
+  private readonly fx = new BurstFx({ sparkWidth: 3, glowSize: 10 });
+  private readonly fxClock = new FailureClock();
+  private fail: LauncherFailure | null = null;
+  /** Camera move that frames a failure outside the view (wall-clock, from the failure). */
+  private camTween: { p0: THREE.Vector3; t0: THREE.Vector3; p1: THREE.Vector3; t1: THREE.Vector3; dur: number } | null = null;
+  private reframed = false;
+  /** Restart the current failure without animation (machine rebuilt mid-failure). */
+  private resumeStill = false;
+  /** Outer vehicle arm + cradle + vehicle: the part that breaks off on a structural failure. */
+  private outerPiece = new THREE.Group();
+  private flingPivot = new THREE.Group();
+  private flingBody = new THREE.Group();
+  private dims = { Rc: 1, D: 1, hubR: 0.5, xBreak: 0.5, xArmEnd: 1, cradle: 0.3, minW: 0.1 };
+  private readonly chamberCollider: Collider = {
+    resolve: (p, r, n) => {
+      const { Rc, D } = this.dims;
+      let hit = false;
+      n.set(0, 0, 0);
+      const lim = Rc - r;
+      const rr = Math.hypot(p.x, p.y);
+      if (rr > lim && rr > 0) {
+        p.x *= lim / rr;
+        p.y *= lim / rr;
+        n.x += p.x / lim;
+        n.y += p.y / lim;
+        hit = true;
+      }
+      const hz = D / 2 - r;
+      if (p.z < -hz) {
+        p.z = -hz;
+        n.z -= 1;
+        hit = true;
+      } else if (p.z > hz) {
+        p.z = hz;
+        n.z += 1;
+        hit = true;
+      }
+      if (hit) n.normalize();
+      return hit;
+    },
+  };
 
   constructor(dom: HTMLElement, overlayParent: HTMLElement) {
     this.scene.background = new THREE.Color(COLORS.background);
@@ -193,7 +315,7 @@ export class LauncherView implements View {
     this.scene.add(this.flownTrack.object, this.predictedTrack.object, this.pathCircle.object, this.releaseArc.object, this.corridorLine.object, this.tunnelWallA.object, this.tunnelWallB.object);
     this.scene.add(this.vArrow.group, this.aArrow.group);
     this.labels.add(this.vLabel, this.aLabel, this.awayLabel, this.vehicleLabel);
-    this.scene.add(this.vehicleRing, this.vehicleGlow);
+    this.scene.add(this.vehicleRing, this.vehicleGlow, this.fx.group);
     this.vehicleGlow.layers.set(MAIN_ONLY_LAYER);
     // Main-camera-only helpers stay out of the detail inset.
     this.camera.layers.enable(MAIN_ONLY_LAYER);
@@ -226,6 +348,7 @@ export class LauncherView implements View {
     this.camera.aspect = w / Math.max(h, 1);
     this.camera.updateProjectionMatrix();
     for (const t of [this.flownTrack, this.predictedTrack, this.pathCircle, this.releaseArc, this.corridorLine, this.tunnelWallA, this.tunnelWallB]) t.setResolution(w, h);
+    this.fx.setResolution(w, h);
   }
 
   resetCamera(): void {
@@ -284,6 +407,12 @@ export class LauncherView implements View {
 
   // ------------------------------------------------------------------ machine
   private build(sc: Scenario): void {
+    // A failure on screen restarts without animation on the new machine.
+    if (this.fail) {
+      this.resetFailure();
+      this.fxClock.forget();
+      this.resumeStill = true;
+    }
     disposeTree(this.machine);
     this.scene.remove(this.machine);
     for (const l of this.fixedLabels) {
@@ -297,6 +426,10 @@ export class LauncherView implements View {
     this.rotor = new THREE.Group();
     this.blurDisc = new THREE.Group();
     this.vehicleOnArm = new THREE.Group();
+    this.outerPiece = new THREE.Group();
+    this.flingPivot = new THREE.Group();
+    this.flingBody = new THREE.Group();
+    this.flingPivot.add(this.flingBody);
     this.scene.add(this.machine);
 
     const g = sc.geometry;
@@ -381,8 +514,18 @@ export class LauncherView implements View {
     const vArm = sc.rotor.vehicleArm, cArm = sc.rotor.counterArm;
     const minW = Math.max(0.1, 0.006 * R), minH = Math.max(0.08, 0.004 * R);
     const cradle = Math.max(0.3, v.diameter * 1.2);
-    const armV = new THREE.Mesh(taperedBar(armStations(vArm, hubR * 0.9, R - v.diameter / 2 - cradle, minW, minH)), armMat);
+    // Vehicle arm in two pieces split at the most-stressed station (kept to 25-70 % of the span),
+    // so a structural failure can break the outer part off.
+    const xA = hubR * 0.9, xB = R - v.diameter / 2 - cradle;
+    const span = Math.max(xB - xA, 1e-3);
+    const xBreak = Math.min(xA + 0.7 * span, Math.max(xA + 0.25 * span, sc.derived.stressMaxAt));
+    const nIn = Math.max(3, Math.round((14 * (xBreak - xA)) / span));
+    const armV = new THREE.Mesh(taperedBar(armStations(vArm, xA, xBreak, minW, minH, nIn)), armMat);
     this.rotor.add(armV);
+    const armVOuter = new THREE.Mesh(taperedBar(armStations(vArm, xBreak, xB, minW, minH, Math.max(3, 14 - nIn))), armMat);
+    this.outerPiece.add(armVOuter);
+    this.rotor.add(this.outerPiece);
+    this.dims = { Rc, D, hubR, xBreak, xArmEnd: xB, cradle, minW };
     const Rcw = sc.rotor.counterRadius;
     const cwSize = Math.max(Math.cbrt(sc.derived.counterMass / 7850), 0.03 * R);
     const armC = new THREE.Mesh(taperedBar(armStations(cArm, hubR * 0.9, Math.max(hubR * 1.2, Rcw - cwSize / 2), minW, minH)), armMat);
@@ -395,15 +538,15 @@ export class LauncherView implements View {
     const mount = new THREE.Mesh(new THREE.BoxGeometry(cradle, Math.max(v.length * 0.45, 0.5), Math.max(minH * 1.6, v.diameter * 1.3)), cwMat.clone());
     (mount.material as THREE.MeshStandardMaterial).color.set('#5c6b7e');
     mount.position.x = R - v.diameter / 2 - cradle / 2;
-    this.rotor.add(mount);
+    this.outerPiece.add(mount);
 
     // Vehicle on the arm: nose along the tangential direction (-Y at phase 0).
     this.vehicle = new VehicleMesh(v);
     this.vehicleOnArm.position.set(R, 0, 0);
     this.vehicleOnArm.rotation.z = -Math.PI / 2;
     this.vehicleOnArm.add(this.vehicle.group);
-    this.rotor.add(this.vehicleOnArm);
-    this.machine.add(this.rotor);
+    this.outerPiece.add(this.vehicleOnArm);
+    this.machine.add(this.rotor, this.flingPivot);
 
     // Stroboscopic swept disc (not part of the rotating group).
     const discR = Math.max(R + v.length / 2, Rcw + cwSize);
@@ -551,10 +694,19 @@ export class LauncherView implements View {
       this.resetPending = false;
       this.applyCameraReset();
     }
+    if (this.camTween) {
+      const tw = this.camTween;
+      const u = Math.min(1, this.fxClock.t / tw.dur);
+      const e = u * u * (3 - 2 * u);
+      this.camera.position.lerpVectors(tw.p0, tw.p1, e);
+      this.controls.target.lerpVectors(tw.t0, tw.t1, e);
+      if (u >= 1 || !ctx.snap?.failure) this.camTween = null;
+    }
     this.controls.enableDamping = !ctx.reducedMotion;
     this.controls.update();
     applyFraming(this.camera, this.width, this.height, ctx.insets);
     this.overlay.layout(ctx.insets, ctx.variant);
+    this.fx.group.visible = !!sc;
     if (!sc || !this.vehicle) {
       this.machine.visible = false;
       this.overlay.setCaption('LAUNCHER', 'no valid configuration');
@@ -580,11 +732,14 @@ export class LauncherView implements View {
     const truePhaseWindow = phase === 'hold' || phase === 'corridor' || sinceRelease < 0.3;
     const strobe = !!snap && omega > STROBE_OMEGA && !truePhaseWindow;
 
-    // Rotor display angle.
+    // Rotor display angle. After a failure the display coasts to rest from where it was.
     let phiDisp = snap ? snap.rotor.phi : Math.PI / 2;
     if (strobe) phiDisp = g.phiRelease - Math.PI / 2 + (ctx.reducedMotion ? 0 : 0.12 * ctx.wall);
+    const fstate = this.fxClock.sync(snap, ctx.dtWall);
+    if (fstate === 'start' || fstate === 'reset') this.resetFailure();
+    if (this.fail) phiDisp = this.fail.phi0 + this.fail.omegaEff * COAST_TAU * (1 - Math.exp(-this.fxClock.t / COAST_TAU));
     this.rotor.rotation.z = -phiDisp;
-    this.blurDisc.visible = strobe && !ctx.reducedMotion;
+    this.blurDisc.visible = strobe && !ctx.reducedMotion && !snap?.failure;
     if (this.blurDisc.visible) {
       const k = Math.min(1, omega / 40);
       ((this.blurDisc.children[0] as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = 0.06 + 0.08 * k;
@@ -619,7 +774,7 @@ export class LauncherView implements View {
       vm.setHeat(veh.temps[0]);
       vm.setThrust(veh.thrust);
     } else {
-      if (this.vehicleOnArm.parent !== this.rotor) this.rotor.add(this.vehicleOnArm);
+      if (this.vehicleOnArm.parent !== this.outerPiece) this.outerPiece.add(this.vehicleOnArm);
       this.vehicleOnArm.position.set(R, 0, 0);
       this.vehicleOnArm.rotation.set(0, 0, -Math.PI / 2);
       vehPos.set(R * Math.cos(phiDisp), -R * Math.sin(phiDisp), 0);
@@ -630,8 +785,17 @@ export class LauncherView implements View {
       vm.setThrust(0);
     }
 
+    // Failure effects (wall clock from the first frame the failure is seen).
+    if (fstate === 'start' && snap?.failure) {
+      this.beginFailure(ctx, sc, snap, phiDisp, strobe, released, vehPos, vehVelDir, speed);
+      this.resumeStill = false;
+    }
+    if (this.fail) this.updateFailure(ctx, sc);
+    const fail = this.fail;
+    const vehicleLost = !!fail && (fail.vehicleGone || fail.fling !== null);
+
     // Force overlays.
-    const showForces = ctx.overlays.forces && !!snap && speed > 0.01;
+    const showForces = ctx.overlays.forces && !!snap && speed > 0.01 && !snap.failure;
     const awayDist = vehPos.length();
     const near = awayDist < g.sEnd + g.chamberRadius * 0.6;
     this.vArrow.group.visible = showForces && near;
@@ -675,30 +839,420 @@ export class LauncherView implements View {
     // Vehicle far away: pointer at the tunnel exit.
     const far = released && !near;
     this.awayLabel.visible = far;
-    vm.group.visible = true;
+    vm.group.visible = !fail?.vehicleGone;
     if (far && veh) {
       const O = this.proj.toSceneV(g.tunnelOrigin, _v);
       const dir = this.proj.dirToScene(g.tunnelDir, _v2).normalize();
       this.awayLabel.position.copy(O).addScaledVector(dir, g.sEnd + g.chamberRadius * 0.25);
-      setLabelText(this.awayLabel, `vehicle ↗ ${fmtKm(veh.altitude)} altitude · ${fmtInt(speed)} m/s\nsee World view`);
+      setLabelText(
+        this.awayLabel,
+        fail?.vehicleGone ? `vehicle lost at ${fmtKm(veh.altitude)} altitude` : `vehicle ↗ ${fmtKm(veh.altitude)} altitude · ${fmtInt(speed)} m/s\nsee World view`,
+      );
     }
-    this.vehicleLabel.visible = !far && ctx.overlays.labels;
+    this.vehicleLabel.visible = !far && ctx.overlays.labels && !vehicleLost;
     if (this.cwLabel) this.cwLabel.visible = this.labelShown(this.cwLabel, ctx.overlays.labels) && !(released && sc.release.balance.releasesBallast);
-    this.vehicleGlow.visible = this.variant === 'play' && !far;
+    this.vehicleGlow.visible = this.variant === 'play' && !far && !vehicleLost;
     setDot(this.vehicleGlow, vehPos);
-    this.vehicleRing.visible = !far;
+    this.vehicleRing.visible = !far && !vehicleLost;
     setDot(this.vehicleRing, vehPos);
     this.vehicleLabel.position.copy(vehPos);
     const outward = _v.copy(vehPos);
     if (released) outward.copy(vehVelDir).multiplyScalar(-1);
     anchorBeyond(outward.lengthSq() > 0 ? outward.normalize() : outward.set(0, -1, 0), this.vehicleLabel, 1.4);
 
-    this.updateInset(!far, vehPos, sc);
-    this.updateText(snap, sc, strobe, released, sinceRelease);
+    this.updateInset(!far && !vehicleLost, vehPos, sc);
+    this.updateText(snap, sc, strobe, released, sinceRelease, ctx.variant);
     this.overlay.setScale(ppu);
   }
 
-  private updateText(snap: Snapshot | null, sc: Scenario, strobe: boolean, released: boolean, sinceRelease: number): void {
+  // ------------------------------------------------------------------ failure effects
+  private resetFailure(): void {
+    // A camera pulled back to show a failure returns to the default framing for the next run.
+    if (this.reframed) {
+      this.reframed = false;
+      this.resetPending = true;
+    }
+    this.fail = null;
+    this.camTween = null;
+    this.fx.clear();
+    this.fx.collider = null;
+    this.fx.group.position.set(0, 0, 0);
+    this.fx.group.scale.setScalar(1);
+    if (this.outerPiece.parent !== this.rotor) this.rotor.add(this.outerPiece);
+    this.outerPiece.position.set(0, 0, 0);
+    this.outerPiece.visible = true;
+    this.vehicle?.group.scale.set(1, 1, 1);
+    this.vehicle?.group.rotation.set(0, 0, 0);
+    this.rotor.position.set(0, 0, 0);
+    this.rotor.rotation.x = 0;
+    this.rotor.rotation.y = 0;
+  }
+
+  /** Metres per screen pixel at scene point p. */
+  private mpp(p: THREE.Vector3): number {
+    return 1 / pxPerUnit(this.camera, Math.max(this.camera.position.distanceTo(p), 1e-3), this.height);
+  }
+
+  /** Corners of the vehicle on the arm (rotor coords): what touches the wall first. */
+  private vehicleCorners(sc: Scenario): Array<[number, number]> {
+    const R = sc.geometry.armRadius, v = sc.vehicle;
+    return [[R + v.diameter / 2, v.length / 2], [R + v.diameter / 2, -v.length / 2]];
+  }
+
+  private beginFailure(
+    ctx: FrameContext, sc: Scenario, snap: Snapshot, phi0: number, strobe: boolean, released: boolean,
+    vehPos: THREE.Vector3, vehVelDir: THREE.Vector3, speed: number,
+  ): void {
+    const kind = String(snap.failure?.kind ?? '');
+    const still = ctx.reducedMotion || this.resumeStill;
+    const { Rc } = this.dims;
+    const fail: LauncherFailure = {
+      kind, still, phi0, omegaEff: 0, slow: null, vehicleGone: false, fling: null, jitter: 0, jitterT: 0, crumple: false,
+      hubSparksUntil: 0, sparkAcc: 0, pending: [], flightAnchor: null, tumble: false, heatUntil: 0, phaseStart: 0, gD: 0.3 * Rc,
+    };
+    this.fail = fail;
+    this.fx.seed(failureSeed(snap));
+    this.fx.collider = this.chamberCollider;
+    this.fx.restSpeed = 0.03 * Rc;
+    const omega = snap.rotor.omega;
+    // Without a failure-specific motion the display coasts from the strobe drift (or true rate) to rest.
+    fail.omegaEff = still ? 0 : strobe ? 0.12 : 0;
+    if (!released) {
+      if (kind === 'structural-limit') return this.beginArmBreak(fail, sc, omega);
+      if (kind === 'component-load') return this.beginCrush(fail, sc, omega, vehPos);
+      if (kind === 'drive-stall') return this.beginStall(fail, omega, strobe);
+    }
+    if (kind === 'bearing-envelope') return this.beginBearing(fail);
+    if (kind === 'drive-stall' || isQuietFailure(kind)) return;
+    if (kind === 'exit-collision' && released) return this.beginExitCollision(fail, sc, vehPos, vehVelDir, speed);
+    // In flight (or an unknown kind): breakup / dust at the vehicle, one effect unit per screen pixel.
+    fail.flightAnchor = vehPos.clone();
+    this.fx.collider = null;
+    const velDir = vehVelDir.clone();
+    const burst = (): void => {
+      fail.vehicleGone = released;
+      if (kind === 'ground-contact') dustPuff(this.fx, Y_AXIS, still);
+      else flightBurst(this.fx, { kind, velDir, down: _v3.set(0, -1, 0), reduced: still, scale: released ? 1 : 0.6 });
+    };
+    // Vehicle already out of the picture: pull the camera back to show where it breaks up, then play it.
+    const delay = released && this.frameFailure(vehPos, ctx, sc) ? 0.9 : 0;
+    fail.phaseStart = delay;
+    if (still || !released) return burst();
+    if (kind === 'unstable-flight') {
+      fail.tumble = true;
+      fail.pending.push({ at: delay + 0.45, run: burst });
+    } else if (kind === 'thermal-envelope') {
+      fail.heatUntil = delay + 0.4;
+      fail.pending.push({ at: delay + 0.4, run: burst });
+    } else if (delay > 0) fail.pending.push({ at: delay, run: burst });
+    else burst();
+  }
+
+  /**
+   * Re-frame the camera on the hub and the vehicle when the vehicle is out of
+   * view (same viewing direction). Tweened over 0.9 s (returns true), or cut
+   * immediately with reduced motion. No-op when the vehicle is too far away.
+   */
+  private frameFailure(p: THREE.Vector3, ctx: FrameContext, sc: Scenario): boolean {
+    const g = sc.geometry;
+    const Rc = g.chamberRadius;
+    this.camera.updateMatrixWorld();
+    const ndc = _v3.copy(p).project(this.camera);
+    const offscreen = Math.abs(ndc.x) > 0.9 || Math.abs(ndc.y) > 0.9 || ndc.z > 1;
+    if (!offscreen && p.length() < g.sEnd + Rc * 0.6) return false;
+    // Vehicle a little above the centre: room for the debris thrown along its path.
+    const target = p.clone().multiplyScalar(0.62);
+    const extent = p.length() * 0.62 + Rc * 0.8;
+    const halfFov = (this.camera.fov * Math.PI) / 360;
+    const { fx, fy } = usableFraction(this.width, this.height, ctx.insets);
+    const fit = Math.min(Math.tan(halfFov) * fy, Math.tan(halfFov) * this.camera.aspect * fx);
+    const dist = (extent * 1.1) / fit;
+    if (!(dist < this.controls.maxDistance * 0.95)) return false;
+    const dir = _v4.copy(this.camera.position).sub(this.controls.target).normalize();
+    const pos = target.clone().addScaledVector(dir, dist);
+    this.reframed = true;
+    if (ctx.reducedMotion) {
+      this.camera.position.copy(pos);
+      this.controls.target.copy(target);
+      this.controls.update();
+      return false;
+    }
+    this.camTween = { p0: this.camera.position.clone(), t0: this.controls.target.clone(), p1: pos, t1: target, dur: 0.9 };
+    return true;
+  }
+
+  /** Static debris resting on the chamber floor (reduced motion / settled state). */
+  private floorScatter(count: number, colors: string[], size: number): void {
+    const { Rc, D } = this.dims;
+    for (let i = 0; i < count; i++) {
+      const a = -Math.PI / 2 + (this.fx.random() - 0.5) * 0.9;
+      const r = Rc - size * 0.35;
+      this.fx.spawnShards({ at: _v3.set(r * Math.cos(a), r * Math.sin(a), (this.fx.random() - 0.5) * D * 0.6), count: 1, size, color: colors, still: true });
+    }
+  }
+
+  /**
+   * Arm overstressed: the outer arm, cradle and vehicle break off at the
+   * most-stressed station and fly as one rigid body (CG velocity omega x r_cg,
+   * still turning at omega) until a corner meets the chamber wall, where the
+   * piece shatters and the fragments skid along the wall.
+   */
+  private beginArmBreak(fail: LauncherFailure, sc: Scenario, omega: number): void {
+    const R = sc.geometry.armRadius;
+    const { Rc, xBreak, minW } = this.dims;
+    const rcg = xBreak + (R - xBreak) * 0.75;
+    const thHit = flingHitAngle(rcg, this.vehicleCorners(sc), Rc * 0.995);
+    const w = clamp(thHit / 1.0, 0.12, 3);
+    fail.slow = omega > 0 ? omega / w : null;
+    fail.jitter = fail.still ? 0 : Math.max(0.04, 0.005 * Rc);
+    fail.jitterT = 1.6;
+    const mpp = this.mpp(this.controls.target);
+    if (fail.still) {
+      fail.omegaEff = 0;
+      fail.vehicleGone = true;
+      this.outerPiece.visible = false;
+      this.floorScatter(10, ARM_SHARDS, Math.max(minW * 1.3, 7 * mpp));
+      this.floorScatter(8, VEHICLE_SHARDS, Math.max(sc.vehicle.diameter, 7 * mpp));
+      return;
+    }
+    fail.omegaEff = w;
+    this.flingPivot.rotation.set(0, 0, -fail.phi0);
+    this.flingBody.position.set(rcg, 0, 0);
+    this.flingBody.rotation.set(0, 0, 0);
+    this.flingBody.add(this.outerPiece);
+    this.outerPiece.position.set(-rcg, 0, 0);
+    fail.fling = { rcg, omega: w, hit: false };
+    // Fracture: sparks and a few chips at the break, carried at the local rim speed.
+    const pB = new THREE.Vector3(xBreak, 0, 0).applyAxisAngle(Z_AXIS, -fail.phi0);
+    const grav = new THREE.Vector3(0, -fail.gD, 0);
+    this.fx.spawnSprite({ at: pB, size: Math.max(minW * 5, 24 * mpp), size1: Math.max(minW * 12, 64 * mpp), life: 0.45, color: '#fff1d0', opacity: 1, kind: 'flash' });
+    this.fx.spawnSprite({ at: pB, size: Math.max(minW * 8, 40 * mpp), size1: Math.max(minW * 16, 90 * mpp), life: 0.7, color: '#ff9a3c', opacity: 0.45, kind: 'flash' });
+    this.fx.spawnSparks({ at: pB, count: 36, vel: rotorVel(pB, w, new THREE.Vector3()), speed: Math.max(w * xBreak * 0.6, 0.12 * Rc), life: 0.8, streak: 0.1, gravity: grav, glow: 0.45 });
+    this.fx.spawnShards({
+      at: pB, count: 7, velAt: (p, o) => rotorVel(p, w, o), speed: w * xBreak * 0.2, size: Math.max(minW * 1.1, 6 * mpp), color: ARM_SHARDS,
+      collide: true, sparkSpeed: 0.2 * w * R, spin: 10, gravity: grav,
+    });
+  }
+
+  /** The flung piece reached the wall: shatter it into fragments with its rigid-body velocities. */
+  private shatter(fail: LauncherFailure, sc: Scenario, hitLocal: [number, number]): void {
+    const fl = fail.fling;
+    if (!fl) return;
+    fl.hit = true;
+    fail.vehicleGone = true;
+    const R = sc.geometry.armRadius, v = sc.vehicle;
+    const { xBreak, xArmEnd, cradle, minW } = this.dims;
+    this.flingPivot.updateMatrixWorld(true);
+    const c = this.flingBody.getWorldPosition(new THREE.Vector3());
+    const w = fl.omega;
+    const vcg = new THREE.Vector3(0, -w * fl.rcg, 0).applyAxisAngle(Z_AXIS, -fail.phi0);
+    const velAt = (p: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 => out.set(w * (p.y - c.y), -w * (p.x - c.x), 0).add(vcg);
+    const local = (x: number, y: number): THREE.Vector3 => this.outerPiece.localToWorld(new THREE.Vector3(x, y, 0));
+    this.outerPiece.visible = false;
+    const mpp = this.mpp(c);
+    const grav = new THREE.Vector3(0, -fail.gD, 0);
+    const vTip = w * R;
+    const common = { velAt, collide: true, sparkSpeed: 0.15 * vTip, gravity: grav, spin: 9 } as const;
+    this.fx.spawnShards({ ...common, at: local(R, -v.length / 2), to: local(R, v.length / 2), count: 22, speed: vTip * 0.1, size: Math.max(v.diameter * 1.1, 7 * mpp), color: VEHICLE_SHARDS });
+    this.fx.spawnShards({ ...common, at: local(xBreak, 0), to: local(xArmEnd, 0), count: 24, speed: vTip * 0.06, size: Math.max(minW * 1.3, 7 * mpp), color: ARM_SHARDS });
+    this.fx.spawnShards({ ...common, at: local(xArmEnd + cradle / 2, 0), count: 5, speed: vTip * 0.08, size: Math.max(cradle * 0.45, 7.5 * mpp), color: '#5c6b7e' });
+    // Impact: flash and a fan of sparks along the wall.
+    const pHit = local(hitLocal[0], hitLocal[1]);
+    const vHit = velAt(pHit, new THREE.Vector3());
+    const radial = new THREE.Vector3(pHit.x, pHit.y, 0).normalize();
+    const along = vHit.clone().addScaledVector(radial, -vHit.dot(radial));
+    const alongDir = along.lengthSq() > 0 ? along.clone().normalize() : new THREE.Vector3(1, 0, 0);
+    this.fx.spawnSprite({ at: pHit, size: Math.max(v.length * 0.5, 22 * mpp), size1: Math.max(v.length * 1.4, 60 * mpp), life: 0.35, color: '#ffe2b0', opacity: 0.95, kind: 'flash' });
+    this.fx.spawnSparks({
+      at: pHit, count: 64, vel: along.multiplyScalar(0.8), cone: { dir: alongDir, angle: 0.45, speed: vTip * 0.6 }, speed: vTip * 0.15,
+      life: 0.8, streak: 0.1, gravity: grav, glow: 0.45,
+    });
+  }
+
+  /**
+   * Payload crushed by the spin load: a flash, the vehicle crumples onto its
+   * cradle and comes apart; the pieces leave tangentially (rim speed).
+   */
+  private beginCrush(fail: LauncherFailure, sc: Scenario, omega: number, vehPos: THREE.Vector3): void {
+    const R = sc.geometry.armRadius, v = sc.vehicle;
+    const { Rc } = this.dims;
+    const d = Math.sqrt(Math.max(Rc * Rc - R * R, (0.1 * Rc) ** 2));
+    const w = clamp(d / (0.7 * R), 0.15, 3);
+    fail.slow = omega > 0 ? omega / w : null;
+    fail.crumple = true;
+    fail.omegaEff = fail.still ? 0 : w;
+    if (fail.still) return;
+    const mpp = this.mpp(vehPos);
+    this.fx.spawnSprite({ at: vehPos, size: Math.max(v.length * 0.6, 20 * mpp), size1: Math.max(v.length * 1.6, 56 * mpp), life: 0.3, color: '#fff4dc', opacity: 1, kind: 'flash' });
+    this.fx.spawnSprite({ at: vehPos, size: Math.max(v.length, 36 * mpp), size1: Math.max(v.length * 2.6, 90 * mpp), life: 0.55, color: '#ff9a3c', opacity: 0.55, kind: 'flash' });
+    fail.pending.push({
+      at: 0.18,
+      run: () => {
+        fail.vehicleGone = true;
+        const wNow = w * Math.exp(-0.18 / COAST_TAU);
+        const a = this.vehicleOnArm.localToWorld(new THREE.Vector3(-v.length / 2, 0, 0));
+        const b = this.vehicleOnArm.localToWorld(new THREE.Vector3(v.length / 2, 0, 0));
+        const mid = a.clone().add(b).multiplyScalar(0.5);
+        const grav = new THREE.Vector3(0, -fail.gD, 0);
+        const m = this.mpp(mid);
+        this.fx.spawnShards({
+          at: a, to: b, count: 20, velAt: (p, o) => rotorVel(p, wNow, o), speed: wNow * R * 0.22, size: Math.max(v.diameter, 6 * m), color: VEHICLE_SHARDS,
+          collide: true, sparkSpeed: 0.15 * wNow * R, spin: 11, gravity: grav,
+        });
+        this.fx.spawnSparks({ at: mid, count: 26, vel: rotorVel(mid, wNow, new THREE.Vector3()), speed: wNow * R * 0.35, life: 0.45, streak: 0.08, gravity: grav, glow: 0.4 });
+      },
+    });
+  }
+
+  /** Bearing overload right after release: the whole rotor shudders, sparks from the bearing housing. */
+  private beginBearing(fail: LauncherFailure): void {
+    if (fail.still) return;
+    const { Rc, D, hubR } = this.dims;
+    fail.jitter = Math.max(0.05, 0.007 * Rc);
+    fail.jitterT = 1.6;
+    fail.hubSparksUntil = 1.6;
+    this.fx.collider = null;
+    const u = Math.max(hubR, 14 * this.mpp(this.controls.target));
+    this.fx.spawnSprite({ at: new THREE.Vector3(0, 0, -D / 2 + D * 0.16), size: u * 4, size1: u * 6, life: 1.8, color: '#ff7a2a', opacity: 0.75, kind: 'glow' });
+  }
+
+  /** Drive too weak: no break-up. The rotor coasts to rest; a faint wisp of smoke and heat at the drive. */
+  private beginStall(fail: LauncherFailure, omega: number, strobe: boolean): void {
+    fail.omegaEff = fail.still ? 0 : strobe ? 0.12 : Math.min(omega, STROBE_OMEGA);
+    if (fail.still) return;
+    const { D, hubR } = this.dims;
+    this.fx.collider = null;
+    // At the front bearing of the hub (facing the camera); at least a few tens of pixels across.
+    const z = D * 0.3;
+    const u = Math.max(hubR, 14 * this.mpp(this.controls.target));
+    for (let i = 0; i < 6; i++) {
+      const r = this.fx.random() - 0.5;
+      this.fx.spawnSprite({
+        at: new THREE.Vector3(u * r * 0.6, u * 0.5, z), size: u * 0.8, size1: u * 3.2, life: 2.4, color: '#aab3bd', opacity: 0.42, kind: 'puff',
+        vel: new THREE.Vector3(u * r * 0.4, u * 0.8, u * 0.2), drag: 0.35, delay: i * 0.4,
+      });
+    }
+    this.fx.spawnSprite({ at: new THREE.Vector3(0, 0, z), size: u * 2, size1: u * 3, life: 3, color: '#ff8a3c', opacity: 0.4, kind: 'glow' });
+  }
+
+  /** Vehicle meets the exit port / tunnel wall: sparks where it touches, fragments carried down the tunnel. */
+  private beginExitCollision(fail: LauncherFailure, sc: Scenario, vehPos: THREE.Vector3, vehVelDir: THREE.Vector3, speed: number): void {
+    const g = sc.geometry, v = sc.vehicle;
+    const { Rc } = this.dims;
+    const ap = g.apertureRadius;
+    const O = this.proj.toSceneV(g.tunnelOrigin, new THREE.Vector3());
+    const dir = this.proj.dirToScene(g.tunnelDir, new THREE.Vector3()).normalize();
+    const s = _v3.copy(vehPos).sub(O).dot(dir);
+    const lat = _v3.copy(vehPos).sub(O).addScaledVector(dir, -s);
+    const latDir = new THREE.Vector3();
+    if (lat.length() > 0.15 * ap) latDir.copy(lat).normalize();
+    else {
+      // Centred but pitched: the nose swings into the wall on the side it points to.
+      const xb = _v4.set(1, 0, 0).applyQuaternion(this.vehicleOnArm.quaternion);
+      latDir.copy(xb).addScaledVector(dir, -xb.dot(dir));
+      if (latDir.lengthSq() < 1e-6) latDir.set(-dir.y, dir.x, 0);
+      latDir.normalize();
+    }
+    const C = O.clone().addScaledVector(dir, clamp(s, g.sWall, g.sEnd)).addScaledVector(latDir, ap);
+    const tLen = Math.max(g.sEnd - g.sWall, 1);
+    const vD = clamp(tLen / 0.9, 3, Rc);
+    fail.slow = speed > 0 ? speed / vD : null;
+    fail.vehicleGone = true;
+    this.fx.collider = null;
+    const mpp = this.mpp(C);
+    const size = Math.max(v.diameter * 0.9, 7 * mpp);
+    const fwd = (vehVelDir.lengthSq() > 0 ? vehVelDir : dir).clone().normalize();
+    const xb = new THREE.Vector3(1, 0, 0).applyQuaternion(this.vehicleOnArm.quaternion);
+    const a = vehPos.clone().addScaledVector(xb, -v.length / 2), b = vehPos.clone().addScaledVector(xb, v.length / 2);
+    if (fail.still) {
+      this.fx.spawnShards({ at: C.clone().addScaledVector(latDir, -size), count: 8, spread: Math.max(ap, 6 * mpp), size, color: VEHICLE_SHARDS, still: true });
+      return;
+    }
+    // Slow motion: gravity is negligible on this time scale; fragments carry on out of the tunnel.
+    this.fx.spawnSprite({ at: C, size: Math.max(ap * 3, 30 * mpp), size1: Math.max(ap * 8, 80 * mpp), life: 0.4, color: '#fff1d0', opacity: 1, kind: 'flash' });
+    this.fx.spawnSprite({ at: C, size: Math.max(ap * 5, 50 * mpp), size1: Math.max(ap * 12, 120 * mpp), life: 0.7, color: '#ff9a3c', opacity: 0.5, kind: 'flash' });
+    this.fx.spawnSparks({
+      at: C, count: 70, vel: fwd.clone().multiplyScalar(vD * 0.8).addScaledVector(latDir, -vD * 0.2), cone: { dir: fwd, angle: 0.5, speed: vD * 0.7 },
+      life: 0.8, streak: 0.1, drag: 0.4, glow: 0.45,
+    });
+    this.fx.spawnShards({
+      at: a, to: b, count: 22, vel: fwd.clone().multiplyScalar(vD * 0.75), speed: vD * 0.22, drag: 0.35, life: 2.4, fade: 0.8, size, color: VEHICLE_SHARDS, spin: 9,
+    });
+  }
+
+  private updateFailure(ctx: FrameContext, sc: Scenario): void {
+    const fail = this.fail;
+    if (!fail) return;
+    const t = this.fxClock.t;
+    const dt = FailureClock.step(ctx.dtWall);
+    if (fail.pending.length) {
+      const due = fail.pending.filter((p) => p.at <= t);
+      if (due.length) {
+        fail.pending = fail.pending.filter((p) => p.at > t);
+        for (const p of due) p.run();
+      }
+    }
+    // Broken-off piece in flight.
+    const fl = fail.fling;
+    if (fl && !fl.hit) {
+      const th = fl.omega * t;
+      this.flingBody.position.set(fl.rcg, -th * fl.rcg, 0);
+      this.flingBody.rotation.set(0, 0, -th);
+      const lim = this.dims.Rc * 0.995;
+      for (const [x, y] of this.vehicleCorners(sc)) {
+        if (flungCorner(fl.rcg, x, y, th, _v4).lengthSq() >= lim * lim) {
+          this.shatter(fail, sc, [x, y]);
+          break;
+        }
+      }
+    }
+    if (fail.crumple && this.vehicle) {
+      const u = fail.still ? 1 : Math.min(1, t / 0.18);
+      this.vehicle.group.scale.set(1 - 0.25 * u, 1 - 0.6 * u, 1 - 0.45 * u);
+    }
+    // Shudder (unbalanced rotor / failing bearing).
+    if (fail.jitter > 0 && t < fail.jitterT && !ctx.reducedMotion) {
+      const a = fail.jitter * (1 - t / fail.jitterT) ** 2;
+      this.rotor.position.set((Math.random() * 2 - 1) * a, (Math.random() * 2 - 1) * a, 0);
+      this.rotor.rotation.x = ((Math.random() * 2 - 1) * a) / this.dims.Rc;
+      this.rotor.rotation.y = ((Math.random() * 2 - 1) * a) / this.dims.Rc;
+    } else if (this.rotor.position.lengthSq() > 0 || this.rotor.rotation.x !== 0) {
+      this.rotor.position.set(0, 0, 0);
+      this.rotor.rotation.x = 0;
+      this.rotor.rotation.y = 0;
+    }
+    // Bearing sparks from the housing.
+    if (t < fail.hubSparksUntil) {
+      const { Rc, D, hubR } = this.dims;
+      fail.sparkAcc += dt * 150 * (1 - t / fail.hubSparksUntil);
+      const n = Math.floor(fail.sparkAcc);
+      if (n > 0) {
+        fail.sparkAcc -= n;
+        const a = this.fx.random() * Math.PI * 2;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const vs = 0.22 * Rc;
+        this.fx.spawnSparks({
+          at: _v3.set(hubR * 1.55 * ca, hubR * 1.55 * sa, -D / 2 + D * 0.13), count: n,
+          vel: _v4.set(sa * vs + ca * 0.5 * vs, -ca * vs + sa * 0.5 * vs, 0.4 * vs), speed: vs * 0.5, life: 0.65, streak: 0.07,
+          gravity: _v2.set(0, -fail.gD, 0), glow: 0.35,
+        });
+      }
+    }
+    if (this.vehicle) {
+      const tp = t - fail.phaseStart;
+      if (fail.tumble && tp >= 0 && !fail.vehicleGone) this.vehicle.group.rotation.set(0, 0, 0.5 * 30 * tp * tp);
+      if (tp >= 0 && t < fail.heatUntil) this.vehicle.setHeat(1300 + 1700 * Math.min(1, tp / Math.max(fail.heatUntil - fail.phaseStart, 1e-3)));
+    }
+    // Flight-scale effects: group at the vehicle, one unit per screen pixel (at least L/40).
+    if (fail.flightAnchor) {
+      const k = clamp(this.height / 720, 0.7, 1.3);
+      this.fx.group.position.copy(fail.flightAnchor);
+      this.fx.group.scale.setScalar(Math.max(this.mpp(fail.flightAnchor), sc.vehicle.length / 40) * k);
+    }
+    this.fx.update(dt);
+  }
+
+  private updateText(snap: Snapshot | null, sc: Scenario, strobe: boolean, released: boolean, sinceRelease: number, variant: 'engineer' | 'play'): void {
     if (!snap) {
       this.overlay.setCaption('LAUNCHER · cutaway', `at rest · target ${fmtInt(sc.derived.tipSpeed)} m/s tip speed, ${fmtFixed(sc.derived.rpm, 1)} rpm`);
       this.overlay.setBanner(null);
@@ -708,9 +1262,13 @@ export class LauncherView implements View {
     const parts = [PHASE_NAME[snap.phase] ?? snap.phase];
     if (snap.phase === 'pumpdown') parts.push(`chamber ${fmtPa(r.pressure)}`);
     parts.push(`${fmtFixed(r.rpm, 1)} rpm`, `tip ${fmtInt(r.tipSpeed)} m/s`, `${fmtInt(r.aRadialG)} g`);
-    this.overlay.setCaption('LAUNCHER · cutaway', parts.join(' · '));
+    let detail = parts.join(' · ');
+    const slow = this.fail && !this.fail.still ? this.fail.slow : null;
+    if (slow && Number.isFinite(slow) && slow > 1.5 && this.fxClock.t < 4) detail += `\nSLOW MOTION · debris shown at ≈ 1/${fmtInt(niceRound(slow))} of real speed`;
+    this.overlay.setCaption('LAUNCHER · cutaway', detail);
     if (snap.failure) {
-      this.overlay.setBanner(`FAILURE — ${snap.failure.criterion}: ${snap.failure.message}`, 'warn');
+      // 'play': the game HUD tells the story; the engineer banner stays short.
+      this.overlay.setBanner(variant === 'play' ? null : `FAILURE — ${snap.failure.criterion}`, 'warn');
     } else if (strobe) {
       this.overlay.setBanner(
         `STROBOSCOPIC VIEW — actual rotor ${fmtFixed(r.rpm, 1)} rpm (ω ${fmtFixed(r.omega, 1)} rad/s)\narm drawn at strobe flashes; it is not slowing down`,
@@ -728,6 +1286,7 @@ export class LauncherView implements View {
   dispose(): void {
     this.controls.dispose();
     this.vehicle?.dispose();
+    this.fx.dispose();
     for (const t of [this.flownTrack, this.predictedTrack, this.pathCircle, this.releaseArc, this.corridorLine, this.tunnelWallA, this.tunnelWallB]) t.dispose();
     disposeTree(this.scene);
     this.overlay.dispose();

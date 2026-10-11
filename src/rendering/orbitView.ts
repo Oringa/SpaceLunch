@@ -20,6 +20,7 @@ import { createEarthGeometry, createEarthMaterial, createShellMaterial, setGrati
 import { COLORS, Overlay, type BannerVariant, fmtInt, fmtKm, makeLabel, setLabelText } from './style';
 import { type FrameContext, type View, applyFraming, makeDot, makeGlow, makeRing, setDot, usableFraction } from './viewBase';
 import { maxRow } from './worldView';
+import { BreakupFx } from './effects';
 
 const KM = 1e-3;
 const _v = new THREE.Vector3();
@@ -70,6 +71,8 @@ export class OrbitView implements View {
   private readonly goalRing = new Track({ color: '#ffd166', width: 1.8, opacity: 0.9, renderOrder: 4 });
   private readonly goalLabel = makeLabel('', 'release', [0, 0.5]);
   private goalKey = '';
+  /** In-flight failure at the vehicle (screen-pixel units, drawn over the scene). */
+  private readonly breakup = new BreakupFx({ sparkWidth: 2, glowSize: 6, unlit: true });
   private variant: 'engineer' | 'play' = 'engineer';
   private conicKey = '';
   private bandKey = '';
@@ -106,7 +109,7 @@ export class OrbitView implements View {
     this.scene.add(this.flownTrack.object, this.predictedTrack.object, this.conicTrack.object, this.bandInner.object, this.bandOuter.object);
     this.scene.add(this.siteDot, this.apDot, this.peDot, this.vehicleDot, this.cursorRing, this.vehicleGlow, this.goalRing.object);
     this.labels.add(this.siteLabel, this.apLabel, this.peLabel, this.bandLabel, this.vehicleLabel, this.goalLabel);
-    this.scene.add(this.labels);
+    this.scene.add(this.labels, this.breakup.group);
   }
 
   activate(): void {
@@ -125,6 +128,7 @@ export class OrbitView implements View {
     this.camera.aspect = w / Math.max(h, 1);
     this.camera.updateProjectionMatrix();
     for (const t of this.allTracks()) t.setResolution(w, h);
+    this.breakup.setResolution(w, h);
   }
 
   private allTracks(): Track[] {
@@ -238,17 +242,31 @@ export class OrbitView implements View {
     // Osculating conic + apsides + plane + mission band.
     this.updateConic(st, ppu, ctx);
 
-    // Vehicle.
+    // Failure at the vehicle (wall clock from the first frame it is seen), then the vehicle.
     const veh = snap?.vehicle;
-    this.vehicleDot.visible = !!veh;
-    this.vehicleLabel.visible = !!veh && ctx.overlays.labels;
+    this.breakup.update(snap, ctx.dtWall, ctx.reducedMotion, () =>
+      veh
+        ? {
+          anchor: veh.r,
+          velDir: this.proj.dirToScene(veh.v, new THREE.Vector3()).normalize(),
+          down: this.proj.dirToScene(normalize(veh.r), new THREE.Vector3()).multiplyScalar(-1),
+        }
+        : null,
+    );
+    if (this.breakup.anchor) {
+      this.proj.toSceneV(this.breakup.anchor, this.breakup.group.position);
+      this.breakup.scaleToPixels(this.camera, this.height, 1.0);
+    }
+    const vehShown = !!veh && !this.breakup.vehicleGone;
+    this.vehicleDot.visible = vehShown;
+    this.vehicleLabel.visible = vehShown && ctx.overlays.labels;
     if (veh) {
       this.proj.toSceneV(veh.r, _v);
       setDot(this.vehicleDot, _v);
       this.vehicleLabel.position.copy(_v);
       setLabelText(this.vehicleLabel, `vehicle ${fmtKm(veh.altitude)}\n${fmtInt(veh.vInertial)} m/s inertial${veh.thrust > 0 ? ' · ENGINE ON' : ''}`);
     }
-    this.vehicleGlow.visible = !!veh && this.variant === 'play';
+    this.vehicleGlow.visible = vehShown && this.variant === 'play';
     if (this.vehicleGlow.visible) setDot(this.vehicleGlow, _v.copy(this.vehicleLabel.position));
 
     // Time cursor.
@@ -266,7 +284,8 @@ export class OrbitView implements View {
     const status = orbitStatus(st?.el ?? null, veh ? veh.altitude : null);
     const source = st ? (st.live ? 'osculating, current state' : 'from prediction apex') : 'no trajectory';
     this.overlay.setCaption('ORBIT · inertial (ECI)', `${source} · camera alt ${fmtKm(camDist / KM - R_EARTH)}`);
-    if (snap?.failure) this.overlay.setBanner(`FAILURE — ${snap.failure.criterion}: ${snap.failure.message}`, 'warn');
+    // 'play': the game HUD tells the story; the engineer banner stays short.
+    if (snap?.failure) this.overlay.setBanner(ctx.variant === 'play' ? null : `FAILURE — ${snap.failure.criterion}`, 'warn');
     else this.overlay.setBanner(status.text, status.variant);
     this.overlay.setScale(null);
   }
@@ -429,6 +448,7 @@ export class OrbitView implements View {
 
   dispose(): void {
     this.controls.dispose();
+    this.breakup.dispose();
     for (const t of this.allTracks()) t.dispose();
     disposeTree(this.scene);
     this.earthMat.dispose();

@@ -16,10 +16,18 @@
  *   forces/atmo/pred/labels = 0 to switch overlays off; band=1 mission band.
  *   variant = engineer | play;  insets = top,bottom,left,right (CSS px);
  *   goal   = mission goal altitude in metres; cycle = ms between automatic view switches.
+ *   fail   = FAILURE_CASES id (e.g. fail-structural): run that deterministic failing
+ *            configuration instead of `design`; t=fail shows the moment of failure
+ *            (failure effects then play in wall-clock time).
+ *   fakefail = failure kind (e.g. drive-stall) injected into the snapshot at the
+ *            display time, to preview any kind's effect on any design/phase.
+ *   failafter = ms of wall time before the failure appears (with t=fail or fakefail),
+ *            so screenshots can catch the first moments of the effect.
  */
 import { designById } from '../data/designs';
+import { FAILURE_CASES } from '../data/failures';
 import { buildScenario } from '../sim/build';
-import { Session, type Phase, type Snapshot } from '../sim/session';
+import { Session, type FailureKind, type Phase, type Snapshot } from '../sim/session';
 import { TelemetryTable } from '../sim/telemetry';
 import { G0 } from '../physics/constants';
 import { createRenderer } from './index';
@@ -59,14 +67,17 @@ const goalParam = q.get('goal');
 const goal = goalParam !== null ? Number(goalParam) : null;
 
 function run(id: string): Session {
-  const sc = buildScenario(designById(id));
+  const fc = FAILURE_CASES.find((c) => c.id === id);
+  const sc = buildScenario(fc ? fc.make() : designById(id));
   const s = new Session(sc);
   s.runToEnd();
   return s;
 }
 
+const failCase = q.get('fail');
+const fakeFail = q.get('fakefail');
 const t0 = performance.now();
-const session = run(designId);
+const session = run(failCase ?? designId);
 const sum = session.summary();
 const tRelease = session.releaseRecord?.t ?? sum.times.end;
 const tSpinStart = sum.times.pumpdown;
@@ -74,6 +85,7 @@ const tSpinEnd = sum.times.pumpdown + sum.times.spinup;
 state.info.runMs = Math.round(performance.now() - t0);
 state.info.terminal = sum.terminal;
 state.info.tRelease = tRelease;
+state.info.failure = sum.failure ? { kind: sum.failure.kind, t: sum.failure.t, criterion: sum.failure.criterion } : null;
 
 const ghosts: Array<{ table: TelemetryTable; color: string; label: string }> = [];
 const ghostId = q.get('ghost');
@@ -102,6 +114,9 @@ switch (tParam) {
     break;
   case 'hold':
     tDisplay = tRelease - Math.min(0.05, sum.times.hold * 0.5);
+    break;
+  case 'fail':
+    tDisplay = sum.failure?.t ?? sum.times.end;
     break;
   default:
     tDisplay = tRelease + Number(tParam);
@@ -144,6 +159,12 @@ function snapshotAt(t: number): Snapshot {
     };
     delete s.vehicle;
   }
+  if (fakeFail && t >= (tDisplay ?? 0) && !failHeld()) {
+    s.failure = {
+      kind: fakeFail as FailureKind, t: tDisplay ?? t, criterion: `Harness: ${fakeFail}`, value: 1, threshold: 0, unit: '',
+      message: 'Injected by the render harness (fakefail=).', contributing: [],
+    };
+  }
   return s;
 }
 
@@ -163,8 +184,14 @@ function growFlown(t: number | null): void {
 growFlown(tDisplay);
 
 const wallStart = performance.now();
+state.info.wallStart = wallStart;
+const failAfter = Number(q.get('failafter') ?? 0);
+function failHeld(): boolean {
+  return failAfter > 0 && performance.now() - wallStart < failAfter;
+}
 function currentT(): number | null {
   if (tDisplay === null) return null;
+  if (tParam === 'fail' && failHeld()) return tDisplay - 1e-3;
   if (!play) return tDisplay;
   return Math.min(sum.times.end, tDisplay + ((performance.now() - wallStart) / 1000) * play);
 }
@@ -177,13 +204,16 @@ function currentView(): ViewKind {
 }
 
 let lastSnapT = NaN;
+let lastHeld = false;
 let lastSnap: Snapshot | null = null;
 const source: RenderSource = {
   snapshot() {
     const t = currentT();
     if (t === null) return null;
-    if (t !== lastSnapT) {
+    const held = failHeld();
+    if (t !== lastSnapT || held !== lastHeld) {
       lastSnapT = t;
+      lastHeld = held;
       lastSnap = snapshotAt(t);
       growFlown(t);
     }

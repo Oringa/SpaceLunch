@@ -1428,7 +1428,7 @@ export class Session {
       t: tD,
       phase: displayPhase,
       earthAngle: earthAngle(tD, rot),
-      rotor: { phi: 0, omega: 0, tipSpeed: 0, rpm: 0, aRadialG: 0, lateralLoadG: 1, powerElec: 0, torque: 0, eElec: 0, stressRatio: 0, pressure: 101325, attached: !this.flight },
+      rotor: { phi: 0, omega: 0, tipSpeed: 0, rpm: 0, aRadialG: 0, lateralLoadG: 1, powerElec: 0, torque: 0, eElec: 0, stressRatio: 0, pressure: 101325, attached: !this.releaseRecord },
       terminal: reachedEnd ? this.terminal : undefined,
       failure: this.failure && this.failure.t <= tD ? this.failure : undefined,
     };
@@ -1448,12 +1448,16 @@ export class Session {
         } else {
           phi = (phi + omega * (tD - ti)) % (2 * Math.PI);
         }
-      } else if (this.flight && this.releaseRecord) {
+      } else if (this.releaseRecord) {
         // After release the drive is off; the rotor coasts (losses neglected for display).
+        // Also covers a failure at the release instant, before any flight exists.
         const rr = this.releaseRecord;
         omega = rr.omega;
         phi = (rr.phi + rr.omega * (tD - rr.t)) % (2 * Math.PI);
         row = rt.length - 1;
+      } else {
+        // Ended without a release (e.g. a failure during spin-up): advance from the last row.
+        phi = (phi + omega * (tD - ti)) % (2 * Math.PI);
       }
       snap.rotor = {
         phi, omega, tipSpeed: omega * R, rpm: (omega * 60) / (2 * Math.PI), aRadialG: (omega * omega * R) / G0,
@@ -1461,7 +1465,7 @@ export class Session {
         powerElec: this.flight ? 0 : rt.get('powerElec', row), torque: this.flight ? 0 : rt.get('torque', row),
         eElec: rt.get('eElec', row), stressRatio: rt.get('stressRatio', row),
         pressure: displayPhase === 'pumpdown' ? pressureAt(s.vacuum, tD) : s.config.launcher.vacuum.targetPressurePa,
-        attached: !this.flight || tD < (this.releaseRecord?.t ?? Infinity),
+        attached: tD < (this.releaseRecord?.t ?? Infinity),
       };
     }
     if (this.flight && this.flightInt && this.releaseRecord && tD >= this.releaseRecord.t) {

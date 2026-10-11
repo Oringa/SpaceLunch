@@ -130,10 +130,10 @@ Executed in the development container (Linux, Node 22.22, 4 vCPU) on 2026-10-11:
 | Check | Command | Result |
 |---|---|---|
 | Type-check | `npm run typecheck` | clean (TypeScript 5.9.3, strict) |
-| Unit and integration tests | `npm test` | **110 passed** in 13 files (Vitest 4.0.18), including the production server, ground-track map and worker-fallback tests |
+| Unit and integration tests | `npm test` | **115 passed** in 14 files (Vitest 4.0.18), including the production server, ground-track map, worker fallback, drive stall and Play auto-fit tests. The auto-fit has a property test: random dock settings on every reference design always build. |
 | Numerical validation | `npm run validate` | see [docs/VALIDATION.md](docs/VALIDATION.md): ten-orbit energy drift 2.6e-10, angular-momentum drift 1.3e-10, radial apogee 210.3861 km, drag-decay error 1e-11, all 5 missions pass, all 11 failure cases (including the new drive stall) fail as specified |
 | Production build | `npm run build` | `dist/` ≈ 326 KB gzip main bundle + 116 KB worker; the world map is a separate ≈ 197 KB gzip chunk, loaded only when a map is shown |
-| Browser tests | `npm run test:browser` | **3 passed**: Play flow (home → mission → landing forecast on the mini-map → launch → results with stars and landing point → full-screen map → next mission), Engineer flow (prediction, launch, launcher/world/orbit/map views, analysis), invalid-configuration diagnostic. Served from `dist/` under `/centrifuge/`. |
+| Browser tests | `npm run test:browser` | **4 passed**: Play flow (home → mission → spoiler-free dock → Forecast reveal → launch → results with stars and landing point → full-screen map → next mission); Play break-it flow (release speed maxed → launch allowed → failure stamp → results with the plain-language cause and fix); Engineer flow (prediction, launch, launcher/world/orbit/map views, analysis); invalid-configuration diagnostic. Served from `dist/` under `/centrifuge/`. |
 
 Browsers exercised: **Chromium 141 (Playwright build 1194) headless, with WebGL2 through SwiftShader software rendering**, at 1440×900 and 390×844. Not yet exercised: Firefox, Safari/WebKit, mobile browsers on real devices. The 60 fps target has **not** been measured on real GPU hardware; software rendering in the container is slower than a laptop GPU. Frame-rate profiling on a reference laptop is listed under deferred work.
 

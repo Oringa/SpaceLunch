@@ -21,6 +21,7 @@ import { type Vec3, add, cross, dot, norm, normalize, rotZ, scale, sub } from '.
 import { Projection, disposeTree, eciRowsToEcef, hasTrajectory, pxPerUnit } from './projection';
 import { Track, type RowMapper } from './track';
 import { VehicleMesh } from './vehicleMesh';
+import { BreakupFx } from './effects';
 import { capAnchor, createEarthGeometry, createEarthMaterial, createShellMaterial, createSiteCap, setGraticule } from './earth';
 import { COLORS, Overlay, fmtFixed, fmtInt, fmtKm, makeLabel, niceStep, setLabelText } from './style';
 import {
@@ -39,6 +40,8 @@ const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 interface GhostEntry {
   track: Track;
@@ -98,6 +101,8 @@ export class WorldView implements View {
   private readonly goalLabel = makeLabel('', 'release', [-0.06, 0.5]);
   private goalKey = '';
   private siteText = { full: 'LAUNCH SITE', short: 'LAUNCH SITE' };
+  /** In-flight failure at the vehicle (screen-pixel units, drawn over the scene). */
+  private readonly breakup = new BreakupFx({ sparkWidth: 2.2, glowSize: 7 });
   /** Bounding box of the framing trajectory (ECEF): centre and half-diagonal (m). */
   private arcFrame: { table: TelemetryTable | null; len: number; centre: Vec3 | null; extent: number; a0: number; a1: number } = {
     table: null, len: -1, centre: null, extent: 0, a0: -0.01, a1: 0.02,
@@ -139,7 +144,7 @@ export class WorldView implements View {
     this.scene.add(this.flownTrack.object, this.predictedTrack.object);
     this.scene.add(this.apoDot, this.vehicleHolder, this.vehicleDot, this.cursorRing);
     this.labels.add(this.apoLabel, this.vehicleLabel, this.goalLabel);
-    this.scene.add(this.labels);
+    this.scene.add(this.labels, this.breakup.group);
   }
 
   activate(): void {
@@ -158,6 +163,7 @@ export class WorldView implements View {
     this.camera.aspect = w / Math.max(h, 1);
     this.camera.updateProjectionMatrix();
     for (const t of this.allTracks()) t.setResolution(w, h);
+    this.breakup.setResolution(w, h);
   }
 
   private allTracks(): Track[] {
@@ -369,7 +375,21 @@ export class WorldView implements View {
     // Apogee marker of the primary trajectory.
     this.updateApogee(pred ?? flown, !!pred, rotating, ctx.overlays.labels);
 
-    // Vehicle.
+    // Failure at the vehicle (wall clock from the first frame it is seen), then the vehicle.
+    this.breakup.update(snap, ctx.dtWall, ctx.reducedMotion, () => {
+      if (!veh || !vehEcef) return null;
+      const om = rotating ? OMEGA_EARTH : 0;
+      const vRel = sub(veh.v, [-om * veh.r[1], om * veh.r[0], 0]);
+      return {
+        anchor: vehEcef,
+        velDir: this.proj.dirToScene(rotZ(vRel, -snap!.earthAngle), new THREE.Vector3()).normalize(),
+        down: this.proj.dirToScene(normalize(vehEcef), new THREE.Vector3()).multiplyScalar(-1),
+      };
+    });
+    if (this.breakup.anchor) {
+      this.proj.toSceneV(this.breakup.anchor, this.breakup.group.position);
+      this.breakup.scaleToPixels(this.camera, this.height, 1.3);
+    }
     this.updateVehicle(snap, vehEcef, rotating, ppu, ctx.overlays.labels);
     this.vehicleGlow.visible = this.variant === 'play' && this.vehicleHolder.visible;
     if (this.vehicleGlow.visible) setDot(this.vehicleGlow, this.vehicleHolder.position);
@@ -384,7 +404,8 @@ export class WorldView implements View {
       'WORLD · Earth-fixed',
       `camera ${fmtKm(range)} from ${this.following === 'vehicle' ? 'vehicle (following)' : 'launch site'} · drag to orbit, wheel to zoom`,
     );
-    if (snap?.failure) this.overlay.setBanner(`FAILURE — ${snap.failure.criterion}: ${snap.failure.message}`, 'warn');
+    // 'play': the game HUD tells the story; the engineer banner stays short.
+    if (snap?.failure) this.overlay.setBanner(ctx.variant === 'play' ? null : `FAILURE — ${snap.failure.criterion}`, 'warn');
     else if (!sc) this.overlay.setBanner('Configuration invalid — showing Earth only', 'warn');
     else this.overlay.setBanner(null);
     this.overlay.setScale(ppu * KM);
@@ -602,7 +623,7 @@ export class WorldView implements View {
   private updateVehicle(snap: Snapshot | null, vehEcef: Vec3 | null, rotating: boolean, ppuTarget: number, labels: boolean): void {
     const veh = snap?.vehicle;
     const vm = this.vehicle;
-    const on = !!veh && !!vehEcef && !!vm;
+    const on = !!veh && !!vehEcef && !!vm && !this.breakup.vehicleGone;
     this.vehicleHolder.visible = on;
     this.vehicleDot.visible = on;
     this.vehicleLabel.visible = on && labels;
@@ -620,8 +641,9 @@ export class WorldView implements View {
     const yb = this.proj.dirToScene(rotZ(qRotate(veh.q, [0, 1, 0]), -ang), new THREE.Vector3());
     const zb = new THREE.Vector3().crossVectors(xb, yb);
     this.vehicleHolder.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(xb, yb, zb));
+    if (this.breakup.tumble) this.vehicleHolder.quaternion.multiply(_q.setFromAxisAngle(Z_AXIS, this.breakup.tumble));
     vm.setAeroshell(veh.aeroshell);
-    vm.setHeat(veh.temps[0]);
+    vm.setHeat(this.breakup.heat ?? veh.temps[0]);
     vm.setThrust(veh.thrust);
     const om = rotating ? OMEGA_EARTH : 0;
     const vRel = norm(sub(veh.v, [-om * veh.r[1], om * veh.r[0], 0]));
@@ -653,6 +675,7 @@ export class WorldView implements View {
   dispose(): void {
     this.controls.dispose();
     this.vehicle?.dispose();
+    this.breakup.dispose();
     for (const t of this.allTracks()) t.dispose();
     if (this.cap) this.cap.geometry.dispose();
     disposeTree(this.scene);

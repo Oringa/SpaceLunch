@@ -103,6 +103,7 @@ export interface AppState {
   records: Record<string, { score: number; label: string; t: number }>;
 }
 
+const IN_FLIGHT_FAILURES = new Set<string>(['aero-overload', 'unstable-flight', 'thermal-envelope']);
 const GHOST_COLORS = ['#c58cff', '#6fd3c4', '#f0b65a'];
 const RECORDS_KEY = 'centrifuge.records.v1';
 const UIMODE_KEY = 'centrifuge.uimode.v1';
@@ -521,6 +522,8 @@ export class Controller {
     if (s.vehicle) {
       const sinceRelease = this.flightTable.length ? s.t - this.flightTable.get('t', 0) : 0;
       if (sinceRelease > 2.5) want = 'world';
+      // An in-flight breakup is shown where it happens, even right after release.
+      if (s.failure && IN_FLIGHT_FAILURES.has(s.failure.kind)) want = 'world';
       if (s.vehicle.altitude > 160_000 && (s.vehicle.orbit.bound || s.vehicle.engineOn || (st.scenario?.stages.length ?? 0) > 0)) want = 'orbit';
     }
     if (want !== st.view) this.store.set({ view: want });
