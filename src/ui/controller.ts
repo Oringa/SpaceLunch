@@ -13,7 +13,7 @@ import type { CommandKind, RunSummary, SimEvent, Snapshot, TimedCommand } from '
 import { TelemetryTable, ROTOR_CHANNELS, FLIGHT_CHANNELS } from '../sim/telemetry';
 import { PREDICTION_CHANNELS } from '../workers/protocol';
 import { designById } from '../data/designs';
-import { missionById, recordKey, type MissionResult } from '../game/missions';
+import { evaluateWithStars, missionById, recordKey, type MissionResult } from '../game/missions';
 
 export type Tab = 'build' | 'flight' | 'analysis';
 export type ViewKind = 'launcher' | 'world' | 'orbit';
@@ -51,7 +51,16 @@ export interface BatchState {
   wallMs?: number;
 }
 
+export type UiMode = 'play' | 'engineer';
+
 export interface AppState {
+  uiMode: UiMode;
+  /** Play mode: show the mission-select home screen. */
+  showHome: boolean;
+  /** Play mode: camera follows the action (launcher -> world -> orbit) until the player picks a view. */
+  autoCamera: boolean;
+  /** Missions completed in this browser (any passing run). */
+  completed: Record<string, number>;
   config: SimConfig;
   configVersion: number;
   designId: string;
@@ -82,12 +91,16 @@ export interface AppState {
   overlays: { forces: boolean; atmosphere: boolean; predicted: boolean; ghosts: boolean; labels: boolean };
   bottomOpen: boolean;
   plotChannels: string[];
+  /** When true the plot set follows the phase (rotor channels before release, flight after). */
+  plotAuto: boolean;
   uiTick: number;
   records: Record<string, { score: number; label: string; t: number }>;
 }
 
 const GHOST_COLORS = ['#c58cff', '#6fd3c4', '#f0b65a'];
 const RECORDS_KEY = 'centrifuge.records.v1';
+const UIMODE_KEY = 'centrifuge.uimode.v1';
+const COMPLETED_KEY = 'centrifuge.completed.v1';
 const CONFIG_KEY = 'centrifuge.config.v1';
 
 function loadJSON<T>(key: string): T | null {
@@ -117,12 +130,16 @@ function tableFrom(batch: TelemetryBatch, existing?: TelemetryTable): TelemetryT
   return t;
 }
 
+const FLIGHT_SET = (sc: Scenario | null): string[] =>
+  sc && sc.stages.length ? ['alt', 'orbit', 'accel', 'prop'] : ['alt', 'vAir', 'q', 'heatFlux'];
+
 export class Controller {
   readonly store: Store<AppState>;
   private live: Worker | null = null;
   private predictor: Worker | null = null;
-  private predictTracker = new LatestJobTracker();
-  private batchTracker = new LatestJobTracker();
+  private jobSeq = { n: 0 };
+  private predictTracker = new LatestJobTracker(this.jobSeq);
+  private batchTracker = new LatestJobTracker(this.jobSeq);
   private predictTimer: ReturnType<typeof setTimeout> | null = null;
   private runCounter = 0;
   private ghostCounter = 0;
@@ -132,6 +149,8 @@ export class Controller {
   rotorTable = new TelemetryTable(ROTOR_CHANNELS);
   flightTable = new TelemetryTable(FLIGHT_CHANNELS);
   frontier = 0;
+  /** Stars held before the latest passing run (to announce a new best). */
+  lastBest: { missionId: string; previous: number } | null = null;
   private uiTimer: ReturnType<typeof setInterval> | null = null;
   private dirtyUi = false;
 
@@ -139,6 +158,10 @@ export class Controller {
     const saved = loadJSON<{ config: SimConfig; designId: string }>(CONFIG_KEY);
     const config = saved?.config && saved.config.modelVersion ? saved.config : designById(initialDesign);
     this.store = new Store<AppState>({
+      uiMode: loadJSON<UiMode>(UIMODE_KEY) ?? 'play',
+      showHome: true,
+      autoCamera: true,
+      completed: loadJSON(COMPLETED_KEY) ?? {},
       config,
       configVersion: 1,
       designId: saved?.designId ?? initialDesign,
@@ -160,6 +183,7 @@ export class Controller {
       overlays: { forces: true, atmosphere: true, predicted: true, ghosts: true, labels: true },
       bottomOpen: true,
       plotChannels: ['alt', 'vAir', 'q', 'heatFlux'],
+      plotAuto: true,
       uiTick: 0,
       records: loadJSON(RECORDS_KEY) ?? {},
     });
@@ -187,6 +211,7 @@ export class Controller {
     this.predictor?.terminate();
     this.live = this.predictor = null;
     if (this.uiTimer) clearInterval(this.uiTimer);
+    if (this.predictTimer) clearTimeout(this.predictTimer);
   }
 
   private sendLive(msg: ToWorker): void {
@@ -361,8 +386,15 @@ export class Controller {
         this.store.set((s) => ({ run: { ...s.run, status: 'rejected', message: m.message } }));
         return;
       case 'snapshot':
+        if (this.store.get().plotAuto) {
+          const pre = m.snapshot.phase === 'pumpdown' || m.snapshot.phase === 'spinup' || m.snapshot.phase === 'hold';
+          const want = pre ? ['tip', 'power', 'energy', 'pressure'] : m.snapshot.phase === 'corridor' ? ['clearance', 'alpha', 'vAir', 'q'] : FLIGHT_SET(this.store.get().scenario);
+          const cur = this.store.get().plotChannels;
+          if (want.join() !== cur.join()) this.store.set({ plotChannels: want });
+        }
         this.snapshot = m.snapshot;
         this.snapshotWall = performance.now();
+        this.autoView();
         this.frontier = m.frontier;
         if (m.playback.playing !== r.playback.playing || m.playback.rate !== r.playback.rate || m.playback.auto !== r.playback.auto || m.playback.computeLimited !== r.playback.computeLimited) {
           this.store.set((s) => ({ run: { ...s.run, playback: m.playback } }));
@@ -383,10 +415,17 @@ export class Controller {
         let missionResult: MissionResult | undefined;
         if (s.missionId && sc) {
           const mission = missionById(s.missionId);
-          if (mission) missionResult = mission.evaluate(m.summary, sc);
+          if (mission) missionResult = evaluateWithStars(mission, m.summary, sc);
         }
         this.store.set((st) => ({ run: { ...st.run, status: 'finished', summary: m.summary, commandLog: m.commandLog, missionResult } }));
         if (missionResult?.passed && missionResult.score !== null && r.config) this.recordScore(r.config, missionResult);
+        if (missionResult?.passed) {
+          const prevStars = this.store.get().completed[missionResult.missionId] ?? 0;
+          this.lastBest = { missionId: missionResult.missionId, previous: prevStars };
+          const done = { ...this.store.get().completed, [missionResult.missionId]: Math.max(prevStars, missionResult.stars ?? 1) };
+          saveJSON(COMPLETED_KEY, done);
+          this.store.set({ completed: done });
+        }
         this.addGhost(m.summary);
         return;
       }
@@ -425,6 +464,33 @@ export class Controller {
 
   removeGhost(id: number): void {
     this.store.set((s) => ({ ghosts: s.ghosts.filter((g) => g.id !== id) }));
+  }
+
+  setUiMode(m: UiMode): void {
+    saveJSON(UIMODE_KEY, m);
+    this.store.set({ uiMode: m });
+  }
+
+  /** Play mode: pick a mission (or sandbox) and load its tested design. */
+  startMission(id: string | null): void {
+    const m = id ? missionById(id) : undefined;
+    this.store.set({ missionId: id, mode: id ? 'missions' : 'sandbox', showHome: false, view: 'launcher', autoCamera: true });
+    if (m) this.loadDesign(m.referenceDesign);
+    this.reset();
+  }
+
+  /** Play-mode camera direction: launcher until shortly after release, then the world view, then orbit. */
+  autoView(): void {
+    const st = this.store.get();
+    if (!st.autoCamera || !this.snapshot) return;
+    const s = this.snapshot;
+    let want: ViewKind = 'launcher';
+    if (s.vehicle) {
+      const sinceRelease = this.flightTable.length ? s.t - this.flightTable.get('t', 0) : 0;
+      if (sinceRelease > 2.5) want = 'world';
+      if (s.vehicle.altitude > 160_000 && (s.vehicle.orbit.bound || s.vehicle.engineOn || (st.scenario?.stages.length ?? 0) > 0)) want = 'orbit';
+    }
+    if (want !== st.view) this.store.set({ view: want });
   }
 
   // ---------------------------------------------------------------- export helpers

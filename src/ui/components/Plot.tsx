@@ -128,13 +128,13 @@ export function Plot({ title, unit, scale, series, t0, xLabel, cursor, onCursor,
       const lab = log ? `1e${v.toFixed(1)}` : Math.abs(v) >= 1e4 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toFixed(Math.abs(v) < 10 ? 2 : 0);
       ctx.fillText(lab, 2, yy + 3);
     }
-    for (let k = 0; k <= 4; k++) {
+    for (let k = 0; k < 4; k++) {
       const xx = pad.l + (pw * k) / 4;
       const v = x0 + ((x1 - x0) * k) / 4;
-      ctx.fillText(Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0), xx - 8, h - 5);
+      ctx.fillText(Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0), xx - (k === 0 ? 0 : 8), h - 5);
     }
-    ctx.fillText(`${xLabel}`, w - pad.r - 60, h - 5);
-    ctx.fillText(unit, pad.l + 2, pad.t - 6);
+    const xl = `${Math.abs(x1) < 10 ? x1.toFixed(2) : x1.toFixed(0)} ${xLabel}`;
+    ctx.fillText(xl, w - pad.r - ctx.measureText(xl).width, h - 5);
     // Events
     if (events) {
       ctx.save();
@@ -208,7 +208,7 @@ export function Plot({ title, unit, scale, series, t0, xLabel, cursor, onCursor,
   return (
     <div className="plot" ref={wrap} onMouseMove={onMove} onMouseLeave={() => onCursor(null)} role="img" aria-label={`${title} plot`}>
       <canvas ref={ref} />
-      <span className="title">{title}</span>
+      <span className="title">{title} <span className="faint">({unit})</span></span>
       {peak && <span className="peak">{peak}</span>}
     </div>
   );

@@ -31,11 +31,12 @@ export function autoRate(s: Session): number {
   const d = s.s.derived;
   switch (s.phase) {
     case 'pumpdown':
-      return Math.max(1, d.pump.time / 4);
+      return Math.max(1, d.pump.time / 2.5);
     case 'spinup':
-      return Math.max(1, (Number.isFinite(d.spinupTimeEstimate) ? d.spinupTimeEstimate : 600) / 6);
+      return Math.max(1, (Number.isFinite(d.spinupTimeEstimate) ? d.spinupTimeEstimate : 600) / 5);
     case 'hold':
-      return 0.1;
+      // Manual training: slow enough to aim at the release window; the physical clock is unchanged.
+      return s.s.config.launcher.release.mode === 'manual-training' ? 0.002 : 0.1;
     case 'corridor':
       return 0.004;
     case 'flight': {
@@ -43,8 +44,6 @@ export function autoRate(s: Session): number {
       const t0 = s.releaseRecord?.t ?? s.t;
       if (s.t - t0 < 1.5) return 0.25;
       if (fl.discrete.engineOn) return 12;
-      const y = (fl as unknown as { discrete: unknown }) && s.extrema.maxAltitude.value;
-      void y;
       if (s.orbitInsertion) return 240;
       return 8;
     }
@@ -174,10 +173,13 @@ export class LiveRun {
         this.sentFlight = s.flightTable.length;
         this.post({ type: 'telemetry', runId: this.runId, batch: b }, b.columns.map((c) => c.buffer));
       }
-      if (s.events.length > this.sentEvents) {
-        const ev: SimEvent[] = s.events.slice(this.sentEvents);
+      // Events are released when the DISPLAY reaches them (the solver frontier may be ahead).
+      let n = this.sentEvents;
+      while (n < s.events.length && (s.events[n].t <= this.display + 1e-9 || (s.ended && this.display >= s.t))) n++;
+      if (n > this.sentEvents) {
+        const ev: SimEvent[] = s.events.slice(this.sentEvents, n);
         this.post({ type: 'events', runId: this.runId, from: this.sentEvents, events: ev });
-        this.sentEvents = s.events.length;
+        this.sentEvents = n;
       }
     }
     if (s.ended && !this.finished && this.display >= s.t) {
@@ -240,7 +242,8 @@ export class JobRunner {
         [...flight.columns.map((c) => c.buffer), ...rotor.columns.map((c) => c.buffer)],
       );
     };
-    slice();
+    // Defer the first slice so a cancel that arrives right behind this job wins.
+    this.defer(slice, 0);
   }
 
   batch(jobId: number, configVersion: number, label: string, configs: SimConfig[], tags: unknown[]): void {
@@ -282,7 +285,7 @@ export class JobRunner {
       if (i < configs.length) this.defer(slice, 0);
       else this.post({ type: 'batch-result', jobId, configVersion, label, results, wallMs: this.now() - t0 });
     };
-    slice();
+    this.defer(slice, 0);
   }
 }
 

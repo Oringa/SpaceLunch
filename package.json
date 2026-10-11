@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "test:browser": "playwright test",
     "docs:params": "node scripts/gen-parameter-dictionary.mjs",
-    "reference": "vitest run src/tests/missions.test.ts"
+    "validate": "node scripts/run-ts.mjs scripts/validation-report.ts",
+    "serve:subpath": "node scripts/serve-subpath.mjs 4173 /centrifuge/"
   },
   "dependencies": {
     "react": "19.2.8",

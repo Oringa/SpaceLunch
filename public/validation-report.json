@@ -1,0 +1,82 @@
+{
+  "modelVersion": "centrifuge-model-1.0.0",
+  "generated": "2026-10-11T08:24:07.392Z",
+  "node": "v22.22.0",
+  "reference": [
+    [
+      "Angular speed",
+      "40 rad/s",
+      "40 rad/s"
+    ],
+    [
+      "Rotor speed",
+      "381.9719 rpm",
+      "381.9719 rpm"
+    ],
+    [
+      "Centripetal acceleration",
+      "80000.0 m/s²",
+      "80,000 m/s²"
+    ],
+    [
+      "Centripetal g-load",
+      "8157.73 g",
+      "8,157.73 g"
+    ],
+    [
+      "200 kg translational energy",
+      "400.000 MJ = 111.111 kWh",
+      "400 MJ = 111.111 kWh"
+    ],
+    [
+      "Dynamic pressure at 1.225 kg/m³",
+      "2.4500 MPa",
+      "2.45 MPa"
+    ],
+    [
+      "Direction error, 1 ms",
+      "0.04000 rad = 2.29183°",
+      "0.04 rad = 2.29183°"
+    ]
+  ],
+  "radialApogee": 210386.068510673,
+  "tenOrbit": {
+    "speed": 7788.487984973157,
+    "dE": 2.563060214807751e-10,
+    "dH": 1.281531072023033e-10,
+    "steps": 2656
+  },
+  "dragError": 9.57732959060047e-12,
+  "missions": [
+    {
+      "id": "m1-clean-release",
+      "passed": true,
+      "key": "apogee 12.4 km",
+      "wallMs": 826.229452
+    },
+    {
+      "id": "m2-thirty-km",
+      "passed": true,
+      "key": "apogee 38.4 km",
+      "wallMs": 1207.614189
+    },
+    {
+      "id": "m3-edge-of-space",
+      "passed": true,
+      "key": "apogee 120.8 km",
+      "wallMs": 1295.9627870000004
+    },
+    {
+      "id": "m4-leo",
+      "passed": true,
+      "key": "orbit 204.9 × 371.7 km",
+      "wallMs": 807.0858019999996
+    },
+    {
+      "id": "m5-optimise",
+      "passed": true,
+      "key": "orbit 204.9 × 362.0 km",
+      "wallMs": 666.8630279999998
+    }
+  ]
+}

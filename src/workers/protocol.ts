@@ -64,8 +64,11 @@ export const PREDICTION_CHANNELS = [
 export class LatestJobTracker {
   private latestJob = 0;
   private latestVersion = 0;
+  /** Trackers sharing one worker must share a sequence so job ids never collide. */
+  constructor(private readonly seq: { n: number } = { n: 0 }) {}
   next(configVersion: number): number {
-    this.latestJob += 1;
+    this.seq.n += 1;
+    this.latestJob = this.seq.n;
     this.latestVersion = configVersion;
     return this.latestJob;
   }

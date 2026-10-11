@@ -30,8 +30,9 @@ const GROUPS: Array<{ group: ParamDef['group']; title: string }> = [
   { group: 'numerics', title: 'Numerics' },
 ];
 
+/** Issues attach to a control only for its exact path or a specific parent (>= 2 segments, e.g. launcher.arm). */
 function issuesFor(path: string, issues: BuildIssue[]): BuildIssue[] {
-  return issues.filter((i) => i.path && (i.path === path || path.startsWith(i.path + '.') || i.path.startsWith(path)));
+  return issues.filter((i) => i.path && (i.path === path || (i.path.split('.').length >= 2 && path.startsWith(i.path + '.'))));
 }
 
 export function ConfigPanel({ ctl }: { ctl: Controller }) {
@@ -133,7 +134,7 @@ export function ConfigPanel({ ctl }: { ctl: Controller }) {
         <div key={g.group}>
           <div className="group-title">{g.title}</div>
           {g.sections.map((sec) => (
-            <details className="section" key={sec.name}>
+            <details className="section" key={sec.name} open={sec.params.some((p) => issuesFor(p.path, errors).length) || undefined}>
               <summary>
                 {sec.name}
                 {sec.params.some((p) => issuesFor(p.path, errors).length) && <span style={{ color: 'var(--bad)' }} aria-label="has errors">✖</span>}
@@ -242,7 +243,7 @@ function Preflight({ ctl, errors, warnings, general, locked, predictionStatus }:
             <span>{c.text}</span>
           </li>
         ))}
-        {[...errors.filter((e) => general.includes(e)), ...warnings.filter((w) => general.includes(w))].map((i, k) => (
+        {[...errors, ...warnings.filter((w) => general.includes(w))].map((i, k) => (
           <li key={`g${k}`}>
             <span className={i.level === 'error' ? 'sym-error' : 'sym-warning'}>{i.level === 'error' ? '✖' : '▲'}</span>
             <span>{i.message}</span>

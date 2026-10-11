@@ -42,6 +42,7 @@ export function TelemetryPanel({ ctl }: { ctl: Controller }) {
   useStore(ctl.store, (s) => s.uiTick);
   const open = useStore(ctl.store, (s) => s.bottomOpen);
   const sel = useStore(ctl.store, (s) => s.plotChannels);
+  const plotAuto = useStore(ctl.store, (s) => s.plotAuto);
   const cursor = useStore(ctl.store, (s) => s.cursorTime);
   const pred = useStore(ctl.store, (s) => s.prediction);
   const ghosts = useStore(ctl.store, (s) => s.ghosts);
@@ -58,7 +59,7 @@ export function TelemetryPanel({ ctl }: { ctl: Controller }) {
 
   const toggle = (id: string): void => {
     const cur = ctl.store.get().plotChannels;
-    ctl.store.set({ plotChannels: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] });
+    ctl.store.set({ plotChannels: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id], plotAuto: false });
   };
   const download = (which: 'flight' | 'rotor' | 'prediction'): void => {
     const csv = ctl.exportTelemetryCSV(which);
@@ -79,6 +80,9 @@ export function TelemetryPanel({ ctl }: { ctl: Controller }) {
         <div className="spacer" />
         {open && (
           <>
+            <label className="toggle" style={{ fontSize: 11.5 }} title="Plots follow the phase: rotor channels before release, flight channels after">
+              <input type="checkbox" checked={plotAuto} onChange={(e) => ctl.store.set({ plotAuto: e.target.checked })} /> auto channels
+            </label>
             <div className="seg" role="group" aria-label="Time axis">
               <button aria-pressed={xMode === 'release'} onClick={() => setXMode('release')}>t − release</button>
               <button aria-pressed={xMode === 'start'} onClick={() => setXMode('start')}>t − start</button>

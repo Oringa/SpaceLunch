@@ -714,7 +714,7 @@ export class Session {
         contributing: [
           { label: 'Balance design', value: s.release.balance.name },
           { label: 'Imbalance load', value: 'm_vehicle · ω² · R' },
-          { label: 'Remedy', value: 'Ballast-release counterbalance, a larger bearing, or a lighter vehicle' },
+          { label: 'Possible remedies (untested hypotheses)', value: 'ballast-release counterbalance, a larger bearing, or a lighter vehicle; try one with a counterfactual run' },
         ],
       });
       return;
@@ -1409,18 +1409,31 @@ export class Session {
   }
 
   // ------------------------------------------------------------------ snapshots
+  /** Phase in effect at time t, from recorded transition times (the frontier may be ahead of the display). */
+  phaseAt(t: number): Phase {
+    if (this.phase === 'ended' && t >= this.t) return 'ended';
+    if (t < this.tPump) return 'pumpdown';
+    if (!Number.isFinite(this.tHoldStart) || t < this.tHoldStart) return 'spinup';
+    if (!this.releaseRecord || t < this.releaseRecord.t) return 'hold';
+    if (!Number.isFinite(this.tReleaseEnd) || t < this.tReleaseEnd) return 'corridor';
+    return 'flight';
+  }
+
   snapshotAt(tDisplay: number): Snapshot {
     const s = this.s;
+    this.memoT = NaN; // evaluate() below reuses the shared derived scratch
     const tD = Math.min(tDisplay, this.t);
+    const displayPhase = this.phaseAt(tD);
     const rot = s.config.physics.earthRotation;
     const R = s.config.launcher.armRadiusM;
+    const reachedEnd = this.phase === 'ended' && tD >= this.t;
     const snap: Snapshot = {
       t: tD,
-      phase: this.phase,
+      phase: displayPhase,
       earthAngle: earthAngle(tD, rot),
       rotor: { phi: 0, omega: 0, tipSpeed: 0, rpm: 0, aRadialG: 0, lateralLoadG: 1, powerElec: 0, torque: 0, eElec: 0, stressRatio: 0, pressure: 101325, attached: !this.flight },
-      terminal: this.terminal,
-      failure: this.failure,
+      terminal: reachedEnd ? this.terminal : undefined,
+      failure: this.failure && this.failure.t <= tD ? this.failure : undefined,
     };
     // Rotor state from telemetry (dense where available).
     const rt = this.rotorTable;
@@ -1450,7 +1463,7 @@ export class Session {
         lateralLoadG: omega > 0 ? this.lateralLoadG(omega) : 1,
         powerElec: this.flight ? 0 : rt.get('powerElec', row), torque: this.flight ? 0 : rt.get('torque', row),
         eElec: rt.get('eElec', row), stressRatio: rt.get('stressRatio', row),
-        pressure: this.phase === 'pumpdown' ? pressureAt(s.vacuum, tD) : s.config.launcher.vacuum.targetPressurePa,
+        pressure: displayPhase === 'pumpdown' ? pressureAt(s.vacuum, tD) : s.config.launcher.vacuum.targetPressurePa,
         attached: !this.flight || tD < (this.releaseRecord?.t ?? Infinity),
       };
     }
@@ -1479,7 +1492,7 @@ export class Session {
         aeroshell: this.flight.discrete.aeroshellAttached, activeStage: this.flight.discrete.activeStage,
         environment: this.flight.discrete.environment, attitudeMode: this.flight.discrete.attitudeMode, orbit: el,
         heatFlags: d.heat.flags, aeroFlags: d.aeroFlags, desiredDir: d.desiredDir ? [...d.desiredDir] as Vec3 : null,
-        clearance: this.phase === 'corridor' ? this.clearanceAt(tD, y) : NaN,
+        clearance: displayPhase === 'corridor' ? this.clearanceAt(tD, y) : NaN,
       };
     }
     return snap;

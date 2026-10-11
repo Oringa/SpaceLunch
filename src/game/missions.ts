@@ -21,6 +21,14 @@ export interface MissionResult {
   objectives: ObjectiveResult[];
   score: number | null;
   scoreLabel: string;
+  /** 0-3 stars (game layer; never affects physics). */
+  stars?: number;
+  starDetails?: Array<{ label: string; earned: boolean }>;
+}
+
+export interface StarTier {
+  label: string;
+  test: (summary: RunSummary, scenario: Scenario) => boolean;
 }
 
 export interface Mission {
@@ -32,6 +40,10 @@ export interface Mission {
   referenceDesign: string;
   /** Constraints shown to the player before launch. */
   constraints: string[];
+  /** Star tiers after the pass condition (star 1 = pass). */
+  starTiers: [StarTier, StarTier];
+  /** Goal altitude shown in the world view (m), if any. */
+  goalAltitude?: number;
   evaluate(summary: RunSummary, scenario: Scenario): MissionResult;
 }
 
@@ -50,6 +62,10 @@ export const MISSIONS: Mission[] = [
     brief: 'Release an instrument package cleanly through the exit port and keep it within its load and thermal envelopes through apogee.',
     referenceDesign: 'instrument-hop',
     constraints: ['Phase-locked release', 'Instrument package must survive to apogee'],
+    starTiers: [
+      { label: 'Apogee ≥ 10 km', test: (s) => s.extrema.maxAltitude.value >= 10_000 },
+      { label: 'Apogee ≥ 15 km', test: (s) => s.extrema.maxAltitude.value >= 15_000 },
+    ],
     evaluate(sum) {
       const clean = sum.achievements.includes('clean-release');
       const apogeeT = sum.extrema.maxAltitude.t;
@@ -68,6 +84,11 @@ export const MISSIONS: Mission[] = [
     brief: 'Reach 30 km altitude using no more than 0.60 MWh of electrical energy for spin-up.',
     referenceDesign: 'thirty-km',
     constraints: ['Electrical energy ≤ 0.60 MWh', 'Payload ≥ 5 kg'],
+    goalAltitude: 30_000,
+    starTiers: [
+      { label: 'Apogee ≥ 40 km', test: (s) => s.extrema.maxAltitude.value >= 40_000 },
+      { label: 'Use ≤ 0.35 MWh', test: (s) => s.energy.electricalJ / 3.6e9 <= 0.35 },
+    ],
     evaluate(sum, sc) {
       const t30 = sum.achievementTimes['alt-30km'];
       const reached = t30 !== undefined && noFailureBefore(sum, t30);
@@ -90,6 +111,11 @@ export const MISSIONS: Mission[] = [
     brief: 'Carry at least 40 kg above 100 km. Note: crossing 100 km is an altitude record, not an orbit.',
     referenceDesign: 'edge-of-space',
     constraints: ['Payload ≥ 40 kg', 'Payload intact at 100 km'],
+    goalAltitude: 100_000,
+    starTiers: [
+      { label: 'Payload ≥ 60 kg', test: (_s, sc) => sc.vehicle.payloadMass >= 60 },
+      { label: 'Payload ≥ 80 kg', test: (_s, sc) => sc.vehicle.payloadMass >= 80 },
+    ],
     evaluate(sum, sc) {
       const t100 = sum.achievementTimes['alt-100km'];
       const reached = t100 !== undefined && noFailureBefore(sum, t100);
@@ -110,6 +136,11 @@ export const MISSIONS: Mission[] = [
     brief: 'Place at least 10 kg into a validated orbit with periapsis ≥ 200 km and apoapsis ≤ 1,000 km, using an upper stage.',
     referenceDesign: 'leo-reference',
     constraints: ['Payload ≥ 10 kg', 'Periapsis ≥ 200 km', 'Apoapsis ≤ 1,000 km', 'Validated by one orbit of forward propagation'],
+    goalAltitude: 200_000,
+    starTiers: [
+      { label: 'Payload ≥ 15 kg', test: (_s, sc) => sc.vehicle.payloadMass >= 15 },
+      { label: 'Payload ≥ 20 kg', test: (_s, sc) => sc.vehicle.payloadMass >= 20 },
+    ],
     evaluate(sum, sc) {
       const o = sum.orbit;
       const bound = !!o && o.bound;
@@ -135,6 +166,11 @@ export const MISSIONS: Mission[] = [
     brief: 'Deliver ≥ 15 kg to the Mission 4 orbit while keeping margins: arm stress margin ≥ 1.5, nose temperature ≤ 90 % of its envelope. Score: kg per 1,000 cr of per-launch cost.',
     referenceDesign: 'leo-optimised',
     constraints: ['Payload ≥ 15 kg', 'Arm stress margin ≥ 1.5', 'Peak nose temperature ≤ 90 % of envelope', 'Mission 4 orbit band'],
+    goalAltitude: 200_000,
+    starTiers: [
+      { label: '≥ 3.6 kg per 1,000 cr', test: (_s, sc) => (sc.vehicle.payloadMass / sc.derived.costs.perLaunch) * 1000 >= 3.6 },
+      { label: '≥ 4.0 kg per 1,000 cr', test: (_s, sc) => (sc.vehicle.payloadMass / sc.derived.costs.perLaunch) * 1000 >= 4.0 },
+    ],
     evaluate(sum, sc) {
       const base = MISSIONS[3].evaluate(sum, sc);
       const stressOk = sc.derived.stressMargin >= 1.5;
@@ -155,6 +191,20 @@ export const MISSIONS: Mission[] = [
 ];
 
 export const missionById = (id: string): Mission | undefined => MISSIONS.find((m) => m.id === id);
+
+/** Evaluate a mission and award 0-3 stars: star 1 = pass, then the two tiers in order. */
+export function evaluateWithStars(m: Mission, summary: RunSummary, scenario: Scenario): MissionResult {
+  const r = m.evaluate(summary, scenario);
+  const t1 = r.passed && m.starTiers[0].test(summary, scenario);
+  const t2 = t1 && m.starTiers[1].test(summary, scenario);
+  r.stars = r.passed ? 1 + (t1 ? 1 : 0) + (t2 ? 1 : 0) : 0;
+  r.starDetails = [
+    { label: 'Complete the mission', earned: r.passed },
+    { label: m.starTiers[0].label, earned: t1 },
+    { label: m.starTiers[1].label, earned: t2 },
+  ];
+  return r;
+}
 
 /**
  * Records are only comparable within the same model version, fidelity,
