@@ -105,7 +105,7 @@ export function endHeadline(e: TrackEnd, future: boolean): string {
       const s = e.surface;
       if (s?.kind === 'sea') return `${future ? 'Splashes down' : 'Splashed down'} at sea, ${where}`;
       if (s?.kind === 'lake') return `${future ? 'Splashes down' : 'Splashed down'} in ${s.name || 'a lake'}, ${where}`;
-      return `${future ? 'Lands' : 'Landed'} ${where}`;
+      return `${future ? 'Lands' : 'Landed'} in ${s?.kind === 'land' ? countryShort(s.country) : 'open country'}, ${where}`;
     }
     case 'orbit': return future ? 'Stays in orbit: no landing' : 'In orbit: no landing';
     case 'escape': return 'Escapes Earth';
@@ -115,9 +115,26 @@ export function endHeadline(e: TrackEnd, future: boolean): string {
   }
 }
 
-/** Secondary line: the nearest recognisable place. */
+/** Secondary line: the nearest recognisable place (with its country when that differs). */
 export function endNear(e: TrackEnd): string {
   if (e.kind === 'orbit' || e.kind === 'escape') return '';
   const t = nearText(e.near);
-  return t ? `${t}${e.near?.place.country ? `, ${e.near.place.country}` : ''}` : '';
+  if (!t) return '';
+  const here = e.surface?.kind === 'land' ? e.surface.country : '';
+  const there = e.near?.place.country ?? '';
+  return there && there !== here ? `${t}, ${countryShort(there)}` : t;
 }
+
+/** Everyday names for the few countries whose map names are long. */
+export function countryShort(name: string): string {
+  return SHORT[name] ?? name;
+}
+const SHORT: Record<string, string> = {
+  'United States of America': 'the United States',
+  'United Kingdom': 'the United Kingdom',
+  'Dem. Rep. Congo': 'DR Congo',
+  'Central African Rep.': 'the Central African Republic',
+  Netherlands: 'the Netherlands',
+  Philippines: 'the Philippines',
+  'Dominican Rep.': 'the Dominican Republic',
+};

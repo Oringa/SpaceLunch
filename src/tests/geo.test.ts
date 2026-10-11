@@ -1,7 +1,7 @@
 // Ground-track map: embedded base map, geodesy helpers, and track/landing
 // extraction from solver telemetry.
 import { describe, expect, it } from 'vitest';
-import { decodePolyline, describeNear, greatCircle, loadWorld, surfaceAt, compass } from '../data/geo/geo';
+import { countryAt, decodePolyline, describeNear, greatCircle, loadWorld, surfaceAt, compass } from '../data/geo/geo';
 import { trackFrom, trackEnd } from '../ui/map/landing';
 import { TelemetryTable, FLIGHT_CHANNELS } from '../sim/telemetry';
 import { R_EARTH } from '../physics/constants';
@@ -30,6 +30,35 @@ describe('base map data', () => {
     expect(surfaceAt(w, 47.7, -87.5)).toEqual({ kind: 'lake', name: 'Lake Superior' });
     expect(surfaceAt(w, 48.85, 2.35).kind).toBe('land'); // Paris
     expect(surfaceAt(w, 48.85, 2.35 + 360).kind).toBe('land'); // longitude wraps
+  });
+
+  it('knows which country a point is in, with names and map colours', async () => {
+    const w = await loadWorld();
+    expect(w.countries.length).toBeGreaterThan(200);
+    expect(countryAt(w, SITE_DESERT.latitudeDeg, SITE_DESERT.longitudeDeg)?.name).toBe('United States of America');
+    expect(countryAt(w, 31.69, -106.42 - 0.05)?.name).toBe('Mexico'); // Ciudad Juarez, just south of the border
+    expect(countryAt(w, 32.08, 34.80)?.name).toBe('Israel');
+    expect(countryAt(w, 48.85, 2.35)?.name).toBe('France');
+    expect(countryAt(w, 30, -40)).toBeNull();
+    expect(surfaceAt(w, 35.08, -106.65)).toEqual({ kind: 'land', country: 'United States of America' });
+    const mex = w.countries.find((c) => c.name === 'Mexico')!;
+    const usa = w.countries.find((c) => c.name === 'United States of America')!;
+    expect(mex.color).not.toBe(usa.color); // neighbours are coloured apart
+    expect(usa.labelLat).toBeGreaterThan(30);
+    expect(usa.labelLat).toBeLessThan(50);
+  });
+
+  it('separates coastlines from borders and drops the antimeridian cut', async () => {
+    const w = await loadWorld();
+    expect(w.coasts.length).toBeGreaterThan(500);
+    expect(w.borders.length).toBeGreaterThan(300);
+    for (const c of w.coasts) {
+      expect(c.minLon >= 179.9 || c.maxLon <= -179.9).toBe(false);
+      expect(c.maxLat <= -89.9).toBe(false);
+    }
+    // The US-Mexico border near El Paso is a border, not a coast.
+    const near = (L: { minLon: number; maxLon: number; minLat: number; maxLat: number }) => L.minLon < -106.4 && L.maxLon > -106.6 && L.minLat < 31.9 && L.maxLat > 31.7;
+    expect(w.borders.some(near)).toBe(true);
   });
 
   it('names a nearby reference place', async () => {
@@ -90,5 +119,26 @@ describe('ground track from telemetry', () => {
     // Due-east azimuth: lands east of the site.
     expect(end.bearingDeg).toBeGreaterThan(80);
     expect(end.bearingDeg).toBeLessThan(100);
+  });
+});
+
+describe('antimeridian', () => {
+  it('rings crossing 180 deg are continuous and still classify points on both sides', async () => {
+    const w = await loadWorld();
+    for (const c of w.countries) {
+      for (const poly of c.polys) {
+        const p = poly[0].pts;
+        for (let i = 2; i < p.length; i += 2) {
+          if (Math.abs(p[i + 1]) >= 89.9 && Math.abs(p[i - 1]) >= 89.9) continue; // edge along the pole
+          expect(Math.abs(p[i] - p[i - 2])).toBeLessThanOrEqual(180);
+        }
+      }
+    }
+    expect(countryAt(w, -17.8, 178.0)?.name).toBe('Fiji'); // Viti Levu, west of 180
+    expect(countryAt(w, -16.8, -179.95)?.name).toBe('Fiji'); // Taveuni, east of 180
+    expect(countryAt(w, 66.0, -175.0)?.name).toBe('Russia'); // Chukotka, east of 180
+    expect(countryAt(w, -80, 0)?.name).toBe('Antarctica');
+    expect(countryAt(w, -87, 179.5)?.name).toBe('Antarctica'); // inland of the Ross Ice Shelf (shelves are not land)
+    expect(countryAt(w, -87, -179.5)?.name).toBe('Antarctica');
   });
 });

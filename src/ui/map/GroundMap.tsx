@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Controller } from '../controller';
 import { useStore } from '../store';
-import { loadWorld, type Line, type World } from '../../data/geo/geo';
+import { countryAt, loadWorld, type Country, type Line, type World } from '../../data/geo/geo';
 import { trackFrom, trackEnd, type Track, type TrackEnd } from './landing';
 import type { TelemetryTable } from '../../sim/telemetry';
 import type { SiteConfig } from '../../sim/config';
@@ -162,7 +162,10 @@ const C = {
   grid: 'rgba(130, 170, 210, 0.10)', border: 'rgba(205, 220, 235, 0.38)', state: 'rgba(205, 220, 235, 0.18)',
   city: '#c9d4e1', cityText: '#b6c3d2', halo: 'rgba(3, 7, 14, 0.9)', ring: 'rgba(255, 180, 84, 0.28)', ringText: 'rgba(255, 196, 120, 0.75)',
   hot: '#ffb454', cool: '#4cc9f0', good: '#5fd38d', bad: '#ff6b6b',
+  landHighlight: '#3b4a3d', countryText: 'rgba(214, 224, 234, 0.6)', countryTextHi: '#f3f6f9',
 };
+/** Muted land tones for Natural Earth MAPCOLOR7 classes 1-7. */
+const COUNTRY_FILL = ['#26322d', '#2c3140', '#35302a', '#283938', '#332d38', '#2e3a2b', '#38342c'];
 
 interface Ctx {
   g: CanvasRenderingContext2D;
@@ -268,6 +271,9 @@ function endWord(e: TrackEnd, future: boolean): string {
 
 function draw(cx: Ctx, world: World | null, sc: MapScene, ends: { forecast: TrackEnd | null; actual: TrackEnd | null }, compact: boolean, time: number): void {
   const { g, w, h, v } = cx;
+  // The country it comes down in (or is forecast to) is tinted brighter.
+  const endPt = sc.finished ? ends.actual : ends.forecast;
+  const highlight = world && endPt && (endPt.kind === 'landing' || endPt.kind === 'lost') ? countryAt(world, endPt.lat, endPt.lon) : null;
   g.clearRect(0, 0, w, h);
   const bg = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.hypot(w, h) / 1.6);
   bg.addColorStop(0, C.oceanA);
@@ -292,18 +298,29 @@ function draw(cx: Ctx, world: World | null, sc: MapScene, ends: { forecast: Trac
   g.stroke();
 
   if (world) {
-    g.beginPath();
-    for (const poly of world.land) {
-      for (const ring of poly) pathLine(cx, ring, true);
+    // Countries, coloured apart from their neighbours (Natural Earth map colours).
+    const visible = (c: Country): boolean => c.maxLat >= cx.visMinLat && c.minLat <= cx.visMaxLat;
+    for (let col = 1; col <= COUNTRY_FILL.length; col++) {
+      g.beginPath();
+      for (const c of world.countries) {
+        if (c.color !== col || c === highlight || !visible(c)) continue;
+        for (const poly of c.polys) for (const ring of poly) pathLine(cx, ring, true);
+      }
+      g.fillStyle = COUNTRY_FILL[col - 1];
+      g.fill('evenodd');
     }
-    g.fillStyle = C.land;
-    g.fill('evenodd');
+    if (highlight) {
+      g.beginPath();
+      for (const poly of highlight.polys) for (const ring of poly) pathLine(cx, ring, true);
+      g.fillStyle = C.landHighlight;
+      g.fill('evenodd');
+    }
     g.beginPath();
     for (const lk of world.lakes) pathLine(cx, lk.ring, true);
     g.fillStyle = C.lake;
     g.fill();
     g.beginPath();
-    for (const poly of world.land) pathLine(cx, poly[0], true);
+    for (const a of world.coasts) pathLine(cx, a, false);
     for (const lk of world.lakes) pathLine(cx, lk.ring, true);
     g.strokeStyle = C.landEdge;
     g.lineWidth = 0.9;
@@ -327,7 +344,7 @@ function draw(cx: Ctx, world: World | null, sc: MapScene, ends: { forecast: Trac
     g.beginPath();
     for (const b of world.borders) pathLine(cx, b, false);
     g.strokeStyle = C.border;
-    g.lineWidth = v.k > 3 ? 1.1 : 0.7;
+    g.lineWidth = v.k > 3 ? 1.3 : 0.8;
     g.stroke();
   }
 
@@ -483,6 +500,24 @@ function draw(cx: Ctx, world: World | null, sc: MapScene, ends: { forecast: Trac
 
   for (const m of markers) m();
 
+  // Country names: Natural Earth min_label against the equivalent web-map zoom.
+  const countryLabels = (): void => {
+    if (!world) return;
+    const zoom = Math.log2((v.k * 360) / 256);
+    const font = `650 ${compact ? 9.5 : v.k > 8 ? 12 : 11}px system-ui, sans-serif`;
+    const sorted = world.countries.filter((c) => c.minLabel <= zoom + (compact ? 1 : 1.6)).sort((a, b) => a.minLabel - b.minLabel);
+    for (const c of sorted) {
+      if (c.labelLat < cx.visMinLat || c.labelLat > cx.visMaxLat) continue;
+      const wPx = (c.maxLon - c.minLon) * v.k * cx.c;
+      const text = c.name.toUpperCase();
+      for (const [x, y] of pointsAt(cx, c.labelLat, c.labelLon)) {
+        if (wPx < text.length * 4.5 && c !== highlight) continue;
+        label(cx, text, x, y, c === highlight ? C.countryTextHi : C.countryText, font, taken, 'center');
+      }
+    }
+  };
+  if (v.k < 6) countryLabels();
+
   // Places, most prominent first; density follows zoom.
   if (world) {
     const maxRank = v.k > 60 ? 8 : v.k > 25 ? 7 : v.k > 10 ? 6 : v.k > 5 ? 4 : v.k > 2.5 ? 2 : 1;
@@ -504,6 +539,8 @@ function draw(cx: Ctx, world: World | null, sc: MapScene, ends: { forecast: Trac
       if (drawn >= limit) break;
     }
   }
+
+  if (v.k >= 6) countryLabels();
 
   // Scale bar (true at the centre latitude, where the projection is conformal)
   if (kmPerPx < 40 && (!compact || w > 260)) {

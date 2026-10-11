@@ -4,15 +4,18 @@
 //
 // <source-dir> must contain these pinned Natural Earth derivatives (all public domain;
 // the npm packages are ISC-licensed packaging of Natural Earth):
-//   wa/package/land-50m.json          npm world-atlas@2.0.2   (npm pack world-atlas@2.0.2)
-//   wa/package/countries-50m.json     npm world-atlas@2.0.2
+//   wa/package/countries-50m.json     npm world-atlas@2.0.2   (npm pack world-atlas@2.0.2)
 //   ua/package/states-10m.json        npm us-atlas@3.0.1      (npm pack us-atlas@3.0.1)
 //   ne_10m_populated_places_simple.geojson   github.com/nvkelso/natural-earth-vector, tag v5.1.2, geojson/
 //   ne_50m_lakes.geojson                     same repository and tag
 //   ne_50m_rivers_lake_centerlines.geojson   same repository and tag
+//   ne_50m_admin_0_countries.geojson         same repository and tag (names, label points, map colours)
 //
 // Output: coordinates quantised to 0.01 deg, lines simplified (Douglas-Peucker), each
-// line stored as a Google-polyline string of [lon, lat] pairs. Decoded by src/data/geo/geo.ts.
+// line stored as a Google-polyline string of [lon, lat] pairs. Countries keep the
+// topology's shared arcs (each border stored once, simplified identically for both
+// neighbours); polygons are lists of arc references (~i = reversed). Decoded by
+// src/data/geo/geo.ts.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
@@ -25,7 +28,6 @@ const OUT = 'src/data/geo/world.json';
 const PRECISION = 100; // 0.01 deg ~ 1.1 km
 const TOL_LAND = 0.016; // deg
 const TOL_LAKE = 0.02;
-const TOL_BORDER = 0.02;
 const TOL_STATE = 0.025;
 const TOL_RIVER = 0.02;
 /**
@@ -55,15 +57,6 @@ function decodeArcs(topo) {
       return [x * sx + tx, y * sy + ty];
     });
   });
-}
-const arcPoints = (arcs, i) => (i >= 0 ? arcs[i] : arcs[~i].slice().reverse());
-function ringFromArcs(arcs, idxs) {
-  const pts = [];
-  for (const i of idxs) {
-    const a = arcPoints(arcs, i);
-    for (let k = pts.length ? 1 : 0; k < a.length; k++) pts.push(a[k]);
-  }
-  return pts;
 }
 function polygonsOf(geom) {
   if (geom.type === 'Polygon') return [geom.arcs];
@@ -143,22 +136,37 @@ function line(pts, tol, minPts) {
   return q.length >= minPts ? encode(q) : null;
 }
 
-// ---- Land polygons (outer ring + holes) ----
-const landTopo = read('wa/package/land-50m.json');
-const landArcs = decodeArcs(landTopo);
-const land = [];
-for (const g of landTopo.objects.land.geometries) {
-  for (const poly of polygonsOf(g)) {
-    const rings = poly.map((r) => line(ringFromArcs(landArcs, r), TOL_LAND, 4));
-    if (!rings[0]) continue;
-    land.push(rings.filter(Boolean));
-  }
-}
-
-// ---- Country borders and US state borders (interior shared arcs only) ----
+// ---- Countries: shared arcs + polygons as arc references ----
 const ctyTopo = read('wa/package/countries-50m.json');
 const ctyArcs = decodeArcs(ctyTopo);
-const borders = sharedArcs(ctyTopo, 'countries').map((id) => line(ctyArcs[id], TOL_BORDER, 2)).filter(Boolean);
+const arcs = ctyArcs.map((a) => {
+  const q = quantise(douglasPeucker(a, TOL_LAND));
+  return encode(q.length ? q : quantise([a[0]]));
+});
+const neCountries = read('ne_50m_admin_0_countries.geojson').features.map((f) => f.properties);
+const NAME_ALIASES = { Macedonia: 'North Macedonia' };
+const neByName = new Map(neCountries.map((p) => [p.NAME, p]));
+const nations = [];
+let unmatched = [];
+for (const g of ctyTopo.objects.countries.geometries) {
+  const name = g.properties?.name ?? '';
+  const ne = neByName.get(NAME_ALIASES[name] ?? name);
+  if (!ne) unmatched.push(name);
+  const polys = polygonsOf(g);
+  if (!polys.length) continue;
+  // [name, map colour 1-7, label lon*100, label lat*100, min label zoom, polygons]
+  nations.push([
+    ne?.NAME ?? name,
+    ne?.MAPCOLOR7 ?? 1,
+    ne ? Math.round(ne.LABEL_X * PRECISION) : null,
+    ne ? Math.round(ne.LABEL_Y * PRECISION) : null,
+    ne?.MIN_LABEL ?? 5,
+    polys,
+  ]);
+}
+if (unmatched.length) console.warn('countries without Natural Earth properties:', unmatched.join(', '));
+
+// ---- US state borders (interior shared arcs only) ----
 const stTopo = read('ua/package/states-10m.json');
 const stArcs = decodeArcs(stTopo);
 const states = sharedArcs(stTopo, 'states').map((id) => line(stArcs[id], TOL_STATE, 2)).filter(Boolean);
@@ -206,11 +214,11 @@ for (const f of places.features) {
 cities.sort((a, b) => a[3] - b[3] || b[5] - a[5]);
 
 const out = {
-  attribution: 'Made with Natural Earth (public domain), via world-atlas 2.0.2 and us-atlas 3.0.1; populated places, lakes and rivers from natural-earth-vector v5.1.2.',
+  attribution: 'Made with Natural Earth (public domain), via world-atlas 2.0.2 and us-atlas 3.0.1; country names, populated places, lakes and rivers from natural-earth-vector v5.1.2.',
   precision: PRECISION,
-  land,
+  arcs,
+  nations,
   lakes,
-  borders,
   states,
   rivers,
   countries,
@@ -219,4 +227,4 @@ const out = {
 mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, JSON.stringify(out));
 const size = Buffer.byteLength(JSON.stringify(out));
-console.log(`${OUT}: ${(size / 1024).toFixed(0)} KB; land polygons ${land.length}, lakes ${lakes.length}, border lines ${borders.length}, state lines ${states.length}, rivers ${rivers.length}, places ${cities.length}`);
+console.log(`${OUT}: ${(size / 1024).toFixed(0)} KB; arcs ${arcs.length}, countries ${nations.length}, lakes ${lakes.length}, state lines ${states.length}, rivers ${rivers.length}, places ${cities.length}`);

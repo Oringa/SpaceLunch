@@ -16,7 +16,7 @@ Starting references for the models, plus notes on how each is used. The same lis
 | R10 | NASA Glenn, Ideal Rocket Equation — https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/ideal-rocket-equation/ | Rocket equation and mass flow. |
 | J77 | L. H. Jorgensen, *Prediction of Static Aerodynamic Characteristics for Slender Bodies Alone and with Lifting Surfaces to Very High Angles of Attack*, NASA TR R-474, 1977 | Functional form of the bounded high-angle crossflow model. The coefficients used here are generic approximations, not values from the report. |
 | H1 | Typical engineering-handbook magnitudes (no single dataset) | Material densities, strengths and thermal properties in presets. Representative values with stated uncertainty, not certified allowables. |
-| NE1 | Natural Earth, free vector and raster map data (public domain) — https://www.naturalearthdata.com/ ; via npm `world-atlas` 2.0.2 and `us-atlas` 3.0.1 (ISC) and https://github.com/nvkelso/natural-earth-vector tag v5.1.2 | Ground-track map base layers: 1:50m land, lakes, rivers and country borders; US state borders (1:10m); populated places (1:10m). Simplified to ~1–2 km by `scripts/gen-geodata.mjs`. |
+| NE1 | Natural Earth, free vector and raster map data (public domain) — https://www.naturalearthdata.com/ ; via npm `world-atlas` 2.0.2 and `us-atlas` 3.0.1 (ISC) and https://github.com/nvkelso/natural-earth-vector tag v5.1.2 | Map layers for the ground-track map and the 3D globe: 1:50m countries (shapes with shared borders from world-atlas; names, label points and map colours from Natural Earth admin-0), lakes and rivers; US state borders (1:10m); populated places (1:10m). Simplified to ~1–2 km by `scripts/gen-geodata.mjs`. |
 
 ## Data and licences
 
