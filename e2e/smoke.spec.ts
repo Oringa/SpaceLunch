@@ -27,8 +27,12 @@ test('Play mode: home → mission 1 → launch → results with stars', async ({
   await page.getByRole('button', { name: /Start here/ }).click();
   await expect(page.locator('.dock')).toBeVisible();
   // The prediction comes from the prediction worker running the same solver.
-  await expect(page.locator('.prediction-pill')).toContainText('Predicted', { timeout: 60_000 });
-  // The landing forecast on the mini-map comes from the same prediction.
+  // Spoiler-free by default: the outcome is found by launching.
+  await expect(page.locator('.prediction-pill')).toContainText('Launch to find out');
+  await expect(page.locator('.minimap-cap')).toContainText('Launch to find out');
+  // The forecast (same solver) is one click away.
+  await page.getByRole('button', { name: /Forecast/ }).click();
+  await expect(page.locator('.prediction-pill')).toContainText('Forecast: mission passes', { timeout: 60_000 });
   await expect(page.locator('.minimap-cap')).toContainText(/Lands .* km E of the launch site/, { timeout: 30_000 });
   await page.screenshot({ path: 'test-results/play-dock.png' });
   await page.locator('.launch-btn').click();
@@ -82,4 +86,29 @@ test('Engineer mode: an invalid configuration blocks launch with a visible diagn
   await radius.press('Enter');
   await expect(page.getByRole('button', { name: /Fix \d+ error/ })).toBeVisible();
   await expect(page.getByText(/Chamber radius .* does not clear the vehicle/).first()).toBeVisible();
+});
+
+test('Play mode: an over-the-top design launches and breaks instead of being refused', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.getByRole('button', { name: /Start here/ }).click();
+  const speed = page.getByRole('slider', { name: 'Release speed' });
+  await speed.evaluate((el: HTMLInputElement) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    set.call(el, el.max);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(page.locator('.dock-value').nth(1)).toContainText('4,000');
+  await expect(page.locator('.launch-btn')).toBeEnabled();
+  await page.locator('.launch-btn').click();
+  await page.getByRole('button', { name: 'Skip to end' }).click();
+  const stamp = page.locator('.fail-stamp');
+  await expect(stamp).toBeVisible({ timeout: 60_000 });
+  await expect(stamp).toContainText(/LAUNCH FAILED|LAUNCH ABORTED/);
+  await page.screenshot({ path: 'test-results/play-fail-stamp.png' });
+  // The stamp gives way to the results card on its own after a moment (or on tap).
+  await expect(page.getByRole('dialog', { name: 'Results' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.results-stamp')).toBeVisible();
+  await expect(page.locator('.results-tip')).toBeVisible();
+  await page.screenshot({ path: 'test-results/play-fail-results.png' });
+  expect(errors.filter((e) => !/favicon/i.test(e))).toEqual([]);
 });

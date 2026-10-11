@@ -30,6 +30,8 @@ CENTRIFUGE uses a reduced-order simulation. It is honest about what it does not 
 | Despin cradle, ballast release | Fictional game hardware | Not a description of any proprietary mechanism |
 | Material and hardware data | Representative handbook magnitudes and game values | Not certified design allowables |
 | Costs | Fictional game credits | Not a cost estimate |
+| Play-mode auto-fit | Vehicle length (and diameter beyond fineness 14), chamber radius and exit aperture are resized around the player's payload, stages and arm, keeping the starting design's clearances | Convenience geometry, not a structural design: the arm sections, bearing, pumps and hub are not resized, so a much bigger tip mass or chamber is expected to overstress the arm, slow the pump-down or fail the bearing |
+| Drive stall | Spin-up counts as stalled at 98.5 % of the drive's equilibrium speed (drive power balancing bearing and residual-gas losses); the launch is then aborted | A real operator might release early at the lower speed; the game aborts instead |
 | Ground-track map | Solver latitude/longitude on the spherical Earth, drawn on Natural Earth layers simplified to about 1–2 km; land/sea/lake test against those polygons | A landing within a few km of a coast can be classified on the wrong side; no terrain, so "landing" is where the vehicle reaches the uniform site elevation. Only the vehicle is tracked: jettisoned stages and debris after a failure are not modelled |
 
 ## Reproducibility

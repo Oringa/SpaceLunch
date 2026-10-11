@@ -14,25 +14,53 @@ import { MOTOR_PRESETS, PROTECTION_PRESETS, UPPER_STAGE_STACKS, BEARING_PRESETS,
 import { AERO_FAMILIES } from '../../physics/aero';
 import { PARAM_BY_PATH, fromDisplay, toDisplay } from '../../data/registry';
 import { getPath } from '../../sim/config';
-import { FAILURE_LABEL, type FailureKind } from '../../sim/labels';
-import type { RunSummary, SimEvent } from '../../sim/session';
+import type { FailureReport, RunSummary, SimEvent } from '../../sim/session';
 import { Help, Inspector } from '../components/Modals';
 import * as F from '../format';
 
-// ------------------------------------------------------------------ plain-language tips
-const TIPS: Record<FailureKind | 'ground', string> = {
-  'component-load': 'Your payload cannot take that many g for that long. Try a longer arm, a lower release speed, or a hardened payload.',
-  'structural-limit': 'The arm was overstressed. Try a lower release speed, a stronger material, or a thicker, more tapered arm (Engineer mode).',
-  'bearing-envelope': 'Once the vehicle leaves, the rotor is lopsided and the bearing takes the hit. Use the ballast-release counterbalance or a bigger bearing.',
-  'exit-collision': 'The vehicle clipped the exit port. A rotating vehicle swings sideways: use the despin cradle, a wider port, or a shorter tunnel.',
-  'aero-overload': 'The vehicle turned sideways in thick air and was overloaded. Add fins, put mass in the nose, or choose a more stable shape.',
-  'unstable-flight': 'The vehicle lost control in thick air. Add fins, put mass in the nose, or choose a more stable shape.',
-  'thermal-envelope': 'The nose overheated: heating grows with speed cubed. Choose a stronger heat shield, a blunter nose, or a slower release.',
-  'propellant-exhausted': 'The rocket ran dry before reaching orbit. Carry less payload or launch faster and steeper so the rocket has less to do.',
-  numerical: 'The solver could not continue with this design. Try less extreme settings.',
-  'ground-contact': 'It came back down before the goal.',
-  ground: 'It came back down. Reaching space is not orbit: you need about 7.8 km/s of sideways speed, which only a rocket stage can add.',
-};
+// ------------------------------------------------------------------ failure copy
+/** Short, playful title; one plain sentence with the real numbers; a realistic fix. */
+interface FailCopy { stamp: string; title: string; line: string; tip: string }
+const num0 = (x: number): string => F.num(x, 0);
+export function failCopy(f: FailureReport): FailCopy {
+  switch (f.kind) {
+    case 'structural-limit':
+      return {
+        stamp: 'LAUNCH FAILED', title: 'Snap! The arm tore apart',
+        line: f.unit === 'MPa'
+          ? `The spin pulled the arm apart: its stress hit ${F.num(f.value / 1000, 2)} GPa, more than the material holds (${F.num(f.threshold / 1000, 2)} GPa).`
+          : 'The spinning arm could not hold together.',
+        tip: 'Spin slower, or pick a stronger arm material in Engineer mode. Arm stress grows with the square of the tip speed.',
+      };
+    case 'component-load':
+      return {
+        stamp: 'LAUNCH FAILED', title: 'Squashed!',
+        line: f.unit === 'g'
+          ? `The payload felt ${num0(f.value)} g on the arm and gave up (its limit is ${num0(f.threshold)} g).`
+          : `The payload sat above its g-limit on the spinning arm for ${num0(f.value)} s, longer than it can take.`,
+        tip: 'A longer arm squeezes less at the same speed (g = v² / R), a stronger motor gets it over with sooner, or carry a hardened payload.',
+      };
+    case 'bearing-envelope':
+      return { stamp: 'LAUNCH FAILED', title: 'Wobble of doom', line: 'The moment the vehicle let go, the rotor turned lopsided and hammered its bearing.', tip: 'Use the counterweight drop (ballast release) or a bigger bearing in Engineer mode.' };
+    case 'exit-collision':
+      return { stamp: 'LAUNCH FAILED', title: 'Clipped the exit!', line: 'The vehicle hit the side of the exit port on its way out.', tip: 'A spinning vehicle swings sideways as it leaves. A despin cradle or a wider port helps.' };
+    case 'aero-overload':
+      return { stamp: 'VEHICLE LOST', title: 'Ripped apart by the air', line: 'It turned sideways in thick air and the air loads tore it up.', tip: 'Fins or weight in the nose keep it pointing forward. A slimmer, more stable shape helps too.' };
+    case 'unstable-flight':
+      return { stamp: 'VEHICLE LOST', title: 'Tumbling!', line: 'It started tumbling in the thick lower air and never recovered.', tip: 'Add fins or put weight in the nose so the air keeps it pointing forward.' };
+    case 'thermal-envelope':
+      return { stamp: 'VEHICLE LOST', title: 'Burned up', line: `The nose reached ${num0(f.value)} ${f.unit}, past its ${num0(f.threshold)} ${f.unit} limit. Air at this speed is hotter than a furnace.`, tip: 'Pick a stronger heat shield, a blunter nose, or a slower release. Heating grows roughly with speed cubed.' };
+    case 'propellant-exhausted':
+      return { stamp: 'MISSION FAILED', title: 'Out of fuel', line: 'The rocket ran dry before reaching orbit.', tip: 'Carry less payload, or launch faster and steeper so the rocket has less to do.' };
+    case 'drive-stall':
+      return { stamp: 'LAUNCH ABORTED', title: 'Not enough muscle', line: `The motor topped out at ${num0(f.value)} of ${num0(f.threshold)} m/s: friction and the last wisps of air eat all of its power.`, tip: 'Pick a stronger motor or a lower release speed.' };
+    case 'ground-contact':
+      return { stamp: 'MISSION FAILED', title: 'Came back down', line: 'It hit the ground before reaching the goal.', tip: 'Release faster or steeper.' };
+    default:
+      return { stamp: 'SIMULATION STOPPED', title: 'Too extreme to simulate', line: 'The solver could not continue with this design.', tip: 'Try less extreme settings.' };
+  }
+}
+const GROUND_TIP = 'It came back down. Reaching space is not orbit: you need about 7.8 km/s of sideways speed, which only a rocket stage can add.';
 
 // ------------------------------------------------------------------ friendly dock controls
 interface DockItem {
@@ -40,56 +68,79 @@ interface DockItem {
   label: string;
   /** Plain-language consequence. */
   note: (c: Controller) => string;
-  status?: (c: Controller) => 'ok' | 'warn' | 'bad';
+  /** 'warn' marks a risky choice; it never blocks the launch. */
+  status?: (c: Controller) => 'ok' | 'warn';
   options?: Record<string, string>;
-  displayUnit?: string;
+  /** Slider step in display units. */
+  step?: number;
+  /** Slider maximum in display units, when tighter than the registry's. */
+  max?: number;
 }
+
+const scen = (c: Controller) => c.store.get().scenario;
+const forecastOn = (c: Controller): boolean => c.store.get().forecastShown;
 
 const DOCK: DockItem[] = [
   {
-    path: 'launcher.armRadiusM', label: 'Arm length',
-    note: (c) => { const d = c.store.get().scenario?.derived; return d ? `${F.num(d.rpm, 0)} rpm · payload feels ${F.num(d.aRadialG, 0)} g` : ''; },
-    status: (c) => { const s = c.store.get().scenario; if (!s) return 'bad'; return s.derived.lateralLoadG > s.vehicle.envelopes.payloadLateralSustainedG ? 'bad' : s.derived.stressMargin < s.config.launcher.structure.safetyFactor ? 'warn' : 'ok'; },
+    path: 'launcher.armRadiusM', label: 'Arm length', step: 0.5,
+    note: (c) => { const d = scen(c)?.derived; return d ? `${F.num(d.rpm, 0)} rpm · payload feels ${F.num(d.aRadialG, 0)} g` : ''; },
+    status: (c) => { const s = scen(c); return s && s.derived.lateralLoadG > s.vehicle.envelopes.payloadLateralSustainedG ? 'warn' : 'ok'; },
   },
   {
-    path: 'launcher.targetTipSpeedMps', label: 'Release speed',
-    note: (c) => { const d = c.store.get().scenario?.derived; return d ? `${F.num(d.tipSpeed * 3.6, 0)} km/h · spin-up ${F.duration(d.spinupTimeEstimate)}` : ''; },
-    status: (c) => { const s = c.store.get().scenario; if (!s) return 'bad'; return s.derived.equilibriumTipSpeed < s.config.launcher.targetTipSpeedMps ? 'bad' : s.derived.stressMargin < 1 ? 'bad' : 'ok'; },
+    path: 'launcher.targetTipSpeedMps', label: 'Release speed', step: 10,
+    note: (c) => {
+      const d = scen(c)?.derived;
+      if (!d) return '';
+      return `${F.num(d.tipSpeed * 3.6, 0)} km/h · ${forecastOn(c) ? `arm stress ${F.num(100 / d.stressMargin, 0)} % of breaking` : `spin-up ${F.duration(d.spinupTimeEstimate)}`}`;
+    },
+    status: (c) => { const s = scen(c); return s && s.derived.stressMargin < s.config.launcher.structure.safetyFactor ? 'warn' : 'ok'; },
   },
   {
-    path: 'flightPlan.elevationDeg', label: 'Launch angle',
+    path: 'launcher.motorId', label: 'Motor',
+    options: { 'drive-1mw': '1 MW', 'drive-2mw': '2 MW', 'drive-8mw': '8 MW', 'drive-25mw': '25 MW', 'drive-50mw': '50 MW' },
+    note: (c) => { const s = scen(c); if (!s) return ''; return s.stallOmega !== null ? `tops out near ${F.num(s.stallOmega * s.config.launcher.armRadiusM, 0)} m/s` : `spin-up ${F.duration(s.derived.spinupTimeEstimate)}`; },
+    status: (c) => (scen(c)?.stallOmega != null ? 'warn' : 'ok'),
+  },
+  {
+    path: 'flightPlan.elevationDeg', label: 'Launch angle', step: 0.5,
     note: () => 'steeper climbs higher; shallower goes farther',
   },
   {
-    path: 'vehicle.payloadMassKg', label: 'Payload',
-    note: (c) => { const d = c.store.get().scenario?.derived; return d ? `whole vehicle ${F.mass(d.wetMass)}` : ''; },
+    path: 'vehicle.payloadMassKg', label: 'Payload', step: 0.5, max: 300,
+    note: (c) => { const s = scen(c); return s ? `vehicle ${F.mass(s.derived.wetMass)}, ${F.num(s.config.vehicle.lengthM, 1)} m long` : ''; },
   },
   {
     path: 'vehicle.aeroFamilyId', label: 'Body shape',
     options: { 'slender-ogive': 'Slender dart', 'blunted-cone': 'Cone', 'hemisphere-cylinder': 'Blunt nose' },
-    note: (c) => { const d = c.store.get().scenario?.derived; return d ? (d.stabilityMarginHypersonicCal > 0 ? 'stable at high speed ✓' : 'unstable at high speed — add fins or nose weight') : ''; },
-    status: (c) => ((c.store.get().scenario?.derived.stabilityMarginHypersonicCal ?? 0) > 0 ? 'ok' : 'warn'),
+    note: (c) => { const d = scen(c)?.derived; return d ? (d.stabilityMarginHypersonicCal > 0 ? 'flies nose-first at high speed' : 'may tumble at high speed: add fins or nose weight') : ''; },
+    status: (c) => ((scen(c)?.derived.stabilityMarginHypersonicCal ?? 0) > 0 ? 'ok' : 'warn'),
   },
   {
     path: 'vehicle.protectionId', label: 'Heat shield',
     options: { none: 'None', 'ti-light': 'Titanium', 'cc-standard': 'Carbon-carbon', 'uhtc-heavy': 'UHTC ceramic' },
-    note: (c) => { const s = c.store.get().scenario; const p = c.store.get().prediction.summary; if (!s) return ''; const lim = s.vehicle.thermal.noseMaterial.maxTemperatureK; return p ? `nose peak ${F.num(p.extrema.maxT1.value, 0)} K of ${lim} K` : `nose limit ${lim} K`; },
-    status: (c) => { const s = c.store.get().scenario; const p = c.store.get().prediction.summary; if (!s || !p) return 'ok'; const r = p.extrema.maxT1.value / s.vehicle.thermal.noseMaterial.maxTemperatureK; return r >= 1 ? 'bad' : r > 0.9 ? 'warn' : 'ok'; },
+    note: (c) => {
+      const s = scen(c);
+      if (!s) return '';
+      const lim = s.vehicle.thermal.noseMaterial.maxTemperatureK;
+      const p = c.store.get().prediction.summary;
+      return forecastOn(c) && p ? `nose peak ${F.num(p.extrema.maxT1.value, 0)} K of ${lim} K` : `nose survives up to ${lim} K`;
+    },
   },
   {
     path: 'vehicle.stackId', label: 'Rocket stage',
     options: { none: 'None', 'kick-solid': 'Solid kick motor', l1: '1 liquid stage', 'l1-l2': '2 liquid stages', 'l1lt-l2': '2 stages (light)' },
-    note: (c) => { const d = c.store.get().scenario?.derived; return d && d.idealDeltaV ? `adds up to ${F.num(d.idealDeltaV, 0)} m/s in space` : 'no rocket: what goes up comes down'; },
+    note: (c) => { const d = scen(c)?.derived; return d && d.idealDeltaV ? `adds up to ${F.num(d.idealDeltaV, 0)} m/s in space` : 'no rocket: what goes up comes down'; },
   },
   {
     path: 'flightPlan.guidance.mode', label: 'After release',
     options: { none: 'Coast', 'assisted-insertion': 'Autopilot to orbit', prograde: 'Burn prograde', 'pitch-program': 'Pitch program' },
-    note: (c) => (c.store.get().scenario?.stages.length ? 'what the rocket does once in thin air' : 'needs a rocket stage'),
+    note: (c) => (scen(c)?.stages.length ? 'what the rocket does once in thin air' : 'needs a rocket stage'),
   },
 ];
 
-function DockControl({ ctl, item, locked }: { ctl: Controller; item: DockItem; locked: boolean }) {
+function DockControl({ ctl, item }: { ctl: Controller; item: DockItem }) {
   useStore(ctl.store, (s) => s.configVersion);
+  useStore(ctl.store, (s) => s.forecastShown);
   const completed = useStore(ctl.store, (s) => s.completed);
   const sandbox = useStore(ctl.store, (s) => !s.missionId);
   useStore(ctl.store, (s) => s.prediction.status);
@@ -100,7 +151,7 @@ function DockControl({ ctl, item, locked }: { ctl: Controller; item: DockItem; l
     <div className={`dock-card ${status}`}>
       <div className="dock-label">
         <span>{item.label}</span>
-        <span className="dock-status" aria-label={status === 'ok' ? 'ok' : status === 'warn' ? 'warning' : 'problem'}>{status === 'ok' ? '✓' : status === 'warn' ? '▲' : '✖'}</span>
+        <span className="dock-status" title={status === 'warn' ? 'Risky: it may break. Launch to find out.' : undefined} aria-label={status === 'ok' ? 'ok' : 'risky'}>{status === 'ok' ? '✓' : '▲ risky'}</span>
       </div>
       {def.kind === 'number' ? (
         <>
@@ -109,15 +160,14 @@ function DockControl({ ctl, item, locked }: { ctl: Controller; item: DockItem; l
             type="range"
             aria-label={item.label}
             min={toDisplay(def, def.min!)}
-            max={toDisplay(def, item.path === 'vehicle.payloadMassKg' ? 300 : def.max!)}
-            step={item.path === 'launcher.targetTipSpeedMps' ? 10 : item.path === 'vehicle.payloadMassKg' ? 0.5 : 0.5}
+            max={item.max ?? toDisplay(def, def.max!)}
+            step={item.step ?? 1}
             value={toDisplay(def, v as number)}
-            disabled={locked}
-            onChange={(e) => ctl.setParam(item.path, fromDisplay(def, Number(e.target.value)))}
+            onChange={(e) => ctl.setDesignParam(item.path, fromDisplay(def, Number(e.target.value)))}
           />
         </>
       ) : (
-        <select aria-label={item.label} value={String(v)} disabled={locked} onChange={(e) => ctl.setParam(item.path, e.target.value)}>
+        <select aria-label={item.label} value={String(v)} onChange={(e) => ctl.setDesignParam(item.path, e.target.value)}>
           {Object.entries(item.options ?? {}).map(([k, l]) => {
             const open = partUnlocked(k, completed, sandbox) || k === String(v);
             return <option key={k} value={k} disabled={!open}>{open ? l : `🔒 ${l} — ${unlockHint(k)}`}</option>;
@@ -129,38 +179,43 @@ function DockControl({ ctl, item, locked }: { ctl: Controller; item: DockItem; l
   );
 }
 
-function predictionLine(ctl: Controller): { text: string; tone: 'ok' | 'bad' | 'wait' } {
+/** The forecast, when the player asked for it; otherwise nothing that gives the outcome away. */
+function predictionLine(ctl: Controller): { text: string; tone: 'ok' | 'bad' | 'wait' | 'hidden' } {
   const st = ctl.store.get();
   const p = st.prediction;
-  if (st.buildIssues.some((i) => i.level === 'error')) return { text: st.buildIssues.find((i) => i.level === 'error')!.message, tone: 'bad' };
-  if (p.status === 'running') return { text: 'Simulating your design…', tone: 'wait' };
-  if (p.status !== 'done' || !p.summary) return { text: p.message ?? 'Waiting for prediction', tone: 'wait' };
+  const error = st.buildIssues.find((i) => i.level === 'error');
+  if (error) return { text: `Can't build this: ${error.message}`, tone: 'bad' };
+  if (!st.forecastShown) return { text: 'Will it fly or will it break? Launch to find out.', tone: 'hidden' };
+  if (p.status === 'running') return { text: 'Engineers are simulating your design…', tone: 'wait' };
+  if (p.status !== 'done' || !p.summary) return { text: p.message ?? 'Waiting for the forecast', tone: 'wait' };
   const s = p.summary;
   const m = st.missionId ? MISSIONS.find((x) => x.id === st.missionId) : undefined;
-  if (s.failure) return { text: `Predicted: ${FAILURE_LABEL[s.failure.kind].toLowerCase()}`, tone: 'bad' };
+  if (s.failure) return { text: `Forecast: ${failCopy(s.failure).title.toLowerCase()}`, tone: 'bad' };
   if (m && st.scenario) {
     const r = m.evaluate(s, st.scenario);
-    if (!r.passed) return { text: `Predicted: mission not met — ${r.objectives.find((o) => !o.passed)?.label.toLowerCase() ?? ''}`, tone: 'bad' };
-    return { text: `Predicted: mission passes ✓ (${s.orbit?.validated ? `orbit ${F.num(s.orbit.periapsisAltitude / 1000, 0)} × ${F.num(s.orbit.apoapsisAltitude / 1000, 0)} km` : `apogee ${F.km(s.extrema.maxAltitude.value)}`})`, tone: 'ok' };
+    if (!r.passed) return { text: `Forecast: mission not met (${r.objectives.find((o) => !o.passed)?.label.toLowerCase() ?? ''})`, tone: 'bad' };
+    return { text: `Forecast: mission passes (${s.orbit?.validated ? `orbit ${F.num(s.orbit.periapsisAltitude / 1000, 0)} × ${F.num(s.orbit.apoapsisAltitude / 1000, 0)} km` : `peak ${F.km(s.extrema.maxAltitude.value)}`})`, tone: 'ok' };
   }
-  return { text: s.orbit?.validated ? `Predicted: orbit ${F.num(s.orbit.periapsisAltitude / 1000, 0)} × ${F.num(s.orbit.apoapsisAltitude / 1000, 0)} km` : `Predicted: climbs to ${F.km(s.extrema.maxAltitude.value)}, then falls back`, tone: 'ok' };
+  return { text: s.orbit?.validated ? `Forecast: orbit ${F.num(s.orbit.periapsisAltitude / 1000, 0)} × ${F.num(s.orbit.apoapsisAltitude / 1000, 0)} km` : `Forecast: climbs to ${F.km(s.extrema.maxAltitude.value)}, then falls back`, tone: 'ok' };
 }
 
 function DesignDock({ ctl }: { ctl: Controller }) {
   useStore(ctl.store, (s) => s.prediction.status);
   useStore(ctl.store, (s) => s.configVersion);
+  const forecast = useStore(ctl.store, (s) => s.forecastShown);
   const missionId = useStore(ctl.store, (s) => s.missionId);
   const ok = useStore(ctl.store, (s) => !!s.scenario?.ok);
   const [open, setOpen] = useState(true);
   const m = missionId ? MISSIONS.find((x) => x.id === missionId) : undefined;
   const best = useStore(ctl.store, (s) => (missionId ? s.completed[missionId] ?? 0 : 0));
   const pl = predictionLine(ctl);
+  const icon = pl.tone === 'hidden' ? '🚀' : pl.tone === 'wait' ? '⏳' : pl.tone === 'ok' ? '✓' : '✖';
   return (
     <div className={`dock${open ? '' : ' closed'}`}>
       <div className="dock-head">
         <div>
           <div className="dock-mission">{m ? `Mission ${m.index} · ${m.name}` : 'Sandbox'}</div>
-          <div className="dock-brief">{m ? m.brief : 'Free play: every part unlocked, design anything the physics allows.'}</div>
+          <div className="dock-brief">{m ? m.brief : 'Free play: every part unlocked. Build anything and see what breaks.'}</div>
           {m && (
             <div className="dock-stars">
               <span className="st on">★</span> complete · <span className={`st${best >= 2 ? ' on' : ''}`}>★</span> {m.starTiers[0].label} · <span className={`st${best >= 3 ? ' on' : ''}`}>★</span> {m.starTiers[1].label}
@@ -173,12 +228,15 @@ function DesignDock({ ctl }: { ctl: Controller }) {
       </div>
       {open && (
         <div className="dock-row">
-          {DOCK.map((d) => <DockControl key={d.path} ctl={ctl} item={d} locked={false} />)}
+          {DOCK.map((d) => <DockControl key={d.path} ctl={ctl} item={d} />)}
         </div>
       )}
       <div className="dock-foot">
-        <div className={`prediction-pill ${pl.tone}`} aria-live="polite">{pl.tone === 'wait' ? '⏳' : pl.tone === 'ok' ? '✓' : '✖'} {pl.text}</div>
-        <button className="btn map-btn" onClick={() => ctl.store.set({ mapOpen: true })} title="World map: where it will land (M)">🗺 Map</button>
+        <div className={`prediction-pill ${pl.tone}`} aria-live="polite">{icon} {pl.text}</div>
+        <button className="btn forecast-btn" aria-pressed={forecast} onClick={() => ctl.setForecastShown(!forecast)} title="Show the engineers' forecast: outcome, landing point and predicted path (same solver as the launch)">
+          🔮 {forecast ? 'Hide forecast' : 'Forecast'}
+        </button>
+        <button className="btn map-btn" onClick={() => ctl.store.set({ mapOpen: true })} title="World map (M)">🗺 Map</button>
         <button className="launch-btn" disabled={!ok} onClick={() => ctl.launch()}>LAUNCH</button>
       </div>
     </div>
@@ -294,10 +352,11 @@ function Toasts({ ctl }: { ctl: Controller }) {
     if (events.length < seen.current) seen.current = 0;
     const fresh = events.slice(seen.current);
     seen.current = events.length;
-    const add = fresh.filter((e) => (TOAST_KINDS.has(e.kind) || e.severity === 'failure') && !e.kind.startsWith('end:'));
+    // Failures get the full-screen stamp instead of a toast.
+    const add = fresh.filter((e) => TOAST_KINDS.has(e.kind) && e.severity !== 'failure' && !e.kind.startsWith('end:'));
     for (const e of add) {
       const id = nextId.current++;
-      const title = e.severity === 'failure' ? `✖ ${e.label.split(':')[0]}` : (TOAST_TITLE[e.kind]?.(e) ?? e.label);
+      const title = TOAST_TITLE[e.kind]?.(e) ?? e.label;
       setShown((s) => [...s, { id, title, tone: e.severity }].slice(-3));
       // Each toast owns its timer, so later events never cancel earlier removals.
       setTimeout(() => setShown((s) => s.filter((x) => x.id !== id)), 3200);
@@ -420,8 +479,9 @@ function Results({ ctl, summary, result }: { ctl: Controller; summary: RunSummar
   const next = m ? MISSIONS.find((x) => x.index === m.index + 1) : undefined;
   const passed = result ? result.passed : !summary.failure;
   const f = summary.failure;
-  const headline = result ? (passed ? ['', 'Mission complete', 'Great flight', 'Perfect!'][result.stars ?? 1] : 'Mission not passed') : f ? FAILURE_LABEL[f.kind] : summary.orbit?.validated ? 'In orbit!' : 'Flight complete';
-  const tip = f ? TIPS[f.kind] : result && !passed && summary.terminal === 'ground-contact' ? TIPS.ground : null;
+  const fc = f ? failCopy(f) : null;
+  const headline = fc ? fc.title : result ? (passed ? ['', 'Mission complete', 'Great flight', 'Perfect!'][result.stars ?? 1] : 'Mission not passed') : summary.orbit?.validated ? 'In orbit!' : 'Flight complete';
+  const tip = fc ? fc.tip : result && !passed && summary.terminal === 'ground-contact' ? GROUND_TIP : null;
   const lb = ctl.lastBest;
   const newBest = !!(result?.passed && lb && lb.missionId === result.missionId && (result.stars ?? 0) > lb.previous);
   const firstClear = !!(result?.passed && lb && lb.missionId === result.missionId && lb.previous === 0);
@@ -429,7 +489,8 @@ function Results({ ctl, summary, result }: { ctl: Controller; summary: RunSummar
   return (
     <div className="results" role="dialog" aria-label="Results">
       {passed && result && !reduced && <Confetti />}
-      <div className={`results-head ${passed ? 'ok' : 'bad'}`}>{passed ? '' : '✖ '}{headline}</div>
+      {fc && <div className="results-stamp">{fc.stamp}</div>}
+      <div className={`results-head ${passed ? 'ok' : 'bad'}`}>{passed || fc ? '' : '✖ '}{headline}</div>
       {result && (
         <div className="results-stars" aria-label={`${result.stars ?? 0} of 3 stars`}>
           {[0, 1, 2].map((k) => <span key={k} className={`big-star${k < (result.stars ?? 0) ? ' on' : ''}`} style={{ animationDelay: `${0.25 + k * 0.25}s` }}>★</span>)}
@@ -445,20 +506,36 @@ function Results({ ctl, summary, result }: { ctl: Controller; summary: RunSummar
       )}
       {result && !passed && (
         <div className="stars">
-          {result.objectives.filter((o) => !o.passed && o.id !== 'not-orbit').map((o) => <div key={o.id} className="star"><span>✖</span>{o.label}<small>{o.detail}</small></div>)}
+          {result.objectives.filter((o) => !o.passed && o.id !== 'not-orbit').map((o) => <div key={o.id} className="star"><span>✖</span>{o.label}{!f && <small>{o.detail}</small>}</div>)}
         </div>
       )}
-      {f && <p className="results-why">{f.message}</p>}
+      {fc && f && (
+        <div className="results-why">
+          <p>{fc.line}</p>
+          <details>
+            <summary>Engineering detail</summary>
+            <p>{f.message}</p>
+          </details>
+        </div>
+      )}
       {tip && <p className="results-tip">💡 {tip}</p>}
       <LandingLine ctl={ctl} />
-      <div className="results-stats">
-        <Stat k="Highest point" v={F.km(summary.extrema.maxAltitude.value)} />
-        <Stat k="Release speed" v={summary.release ? F.mps(summary.release.tipSpeed) : '—'} />
-        <Stat k="Peak payload load" v={F.g(Math.max(summary.extrema.maxSpinLateralG.value, summary.extrema.maxPayloadLateralG.value))} />
-        <Stat k="Hottest nose" v={F.kelvin(summary.extrema.maxT1.value)} />
-        <Stat k="Electricity" v={`${F.num(summary.energy.electricalJ / 3.6e9, 2)} MWh`} />
-        {summary.orbit ? <Stat k="Orbit" v={`${F.num(summary.orbit.periapsisAltitude / 1000, 0)} × ${F.num(summary.orbit.apoapsisAltitude / 1000, 0)} km`} /> : <Stat k="Flight time" v={F.duration(summary.times.flight)} />}
-      </div>
+      {summary.release ? (
+        <div className="results-stats">
+          <Stat k="Highest point" v={F.km(summary.extrema.maxAltitude.value)} />
+          <Stat k="Release speed" v={F.mps(summary.release.tipSpeed)} />
+          <Stat k="Peak payload load" v={F.g(Math.max(summary.extrema.maxSpinLateralG.value, summary.extrema.maxPayloadLateralG.value))} />
+          <Stat k="Hottest nose" v={F.kelvin(summary.extrema.maxT1.value)} />
+          <Stat k="Electricity" v={`${F.num(summary.energy.electricalJ / 3.6e9, 2)} MWh`} />
+          {summary.orbit ? <Stat k="Orbit" v={`${F.num(summary.orbit.periapsisAltitude / 1000, 0)} × ${F.num(summary.orbit.apoapsisAltitude / 1000, 0)} km`} /> : <Stat k="Flight time" v={F.duration(summary.times.flight)} />}
+        </div>
+      ) : (
+        <div className="results-stats">
+          <Stat k="Never left the machine" v={f ? `after ${F.duration(f.t)}` : '—'} />
+          <Stat k="Peak payload load" v={F.g(summary.extrema.maxSpinLateralG.value)} />
+          <Stat k="Electricity used" v={`${F.num(summary.energy.electricalJ / 3.6e9, 2)} MWh`} />
+        </div>
+      )}
       {unlocked.length > 0 && (
         <div className="unlocks"><b>Unlocked:</b> {unlocked.map((u) => PART_NAME(u)).join(' · ')}{next ? ` · Mission ${next.index}` : ''}</div>
       )}
@@ -476,6 +553,17 @@ function Stat({ k, v }: { k: string; v: string }) {
   return (<div className="stat"><div className="stat-v">{v}</div><div className="stat-k">{k}</div></div>);
 }
 
+function FailStamp({ f, onSkip }: { f: FailureReport; onSkip: () => void }) {
+  const c = failCopy(f);
+  return (
+    <button className="fail-stamp" onClick={onSkip} aria-label={`${c.stamp}: ${c.title}. Continue to results`}>
+      <span className="fail-stamp-k">{c.stamp}</span>
+      <span className="fail-stamp-t">{c.title}</span>
+      <span className="fail-stamp-hint">tap to see what happened</span>
+    </button>
+  );
+}
+
 // ------------------------------------------------------------------ shell
 export function PlayShell({ ctl }: { ctl: Controller }) {
   const showHome = useStore(ctl.store, (s) => s.showHome);
@@ -491,10 +579,35 @@ export function PlayShell({ ctl }: { ctl: Controller }) {
     const t = setTimeout(() => setFlash(false), 650);
     return () => clearTimeout(t);
   }, [released, reduced]);
+  // The failure moment: shake, a big stamp, and a pause so the player sees it
+  // break before the results card (tap the stamp to skip).
+  const failEvent = events.find((e) => e.kind.startsWith('failure:'));
+  const [stampDone, setStampDone] = useState(0);
+  const [shake, setShake] = useState(false);
+  useEffect(() => {
+    if (!failEvent || reduced) return;
+    setShake(true);
+    const t = setTimeout(() => setShake(false), 650);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failEvent?.kind, run.runId]);
+  // The stamp holds until the run has finished, then gives way to the results.
+  const runFinished = run.status === 'finished';
+  useEffect(() => {
+    if (!failEvent || !runFinished) return;
+    const runId = run.runId;
+    const t = setTimeout(() => setStampDone(runId), 2600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failEvent?.kind, runFinished, run.runId]);
   const live = run.status === 'live' || run.status === 'starting';
-  const finished = run.status === 'finished' && run.summary && dismissed !== run.runId;
+  const stamping = !!failEvent && stampDone !== run.runId && run.status !== 'idle';
+  const finished = run.status === 'finished' && run.summary && dismissed !== run.runId && !stamping;
+  const stampFailure: FailureReport | undefined = run.summary?.failure ?? (failEvent
+    ? { kind: failEvent.kind.slice('failure:'.length) as FailureReport['kind'], t: failEvent.t, criterion: '', value: NaN, threshold: NaN, unit: '', message: failEvent.label, contributing: [] }
+    : undefined);
   return (
-    <div className={`play${flash ? ' release-flash' : ''}`}>
+    <div className={`play${flash ? ' release-flash' : ''}${shake ? ' fail-shake' : ''}`}>
       <SimulationView ctl={ctl} variant="play" />
       <div className="play-top">
         <span className="play-logo">CENTRIFUGE</span>
@@ -506,11 +619,12 @@ export function PlayShell({ ctl }: { ctl: Controller }) {
         <button className="btn icon" onClick={() => ctl.store.set({ helpOpen: true })} aria-label="Help">?</button>
       </div>
       {showHome && !live && <Home ctl={ctl} />}
-      {!showHome && !live && !finished && <DesignDock ctl={ctl} />}
-      {!showHome && !live && !finished && <MiniMap ctl={ctl} where="design" />}
+      {!showHome && !live && !finished && !stamping && <DesignDock ctl={ctl} />}
+      {!showHome && !live && !finished && !stamping && <MiniMap ctl={ctl} where="design" />}
       {live && <FlightHud ctl={ctl} />}
       {live && <MiniMap ctl={ctl} where="flight" />}
       {(live || finished) && <Toasts ctl={ctl} />}
+      {stamping && stampFailure && <FailStamp f={stampFailure} onSkip={() => setStampDone(run.runId)} />}
       {finished && (
         <div className="results-back">
           <Results ctl={ctl} summary={run.summary!} result={run.missionResult} />

@@ -92,7 +92,10 @@ e2e/         Playwright browser tests
 **Play mode** is the default, game-first presentation.
 
 - A level map lists five missions that unlock in order; each awards up to three stars, Poly Bridge-style. Better parts unlock as you progress.
-- A design dock offers the eight big choices in plain language, a live verdict from the solver ("Predicted: mission passes"), and one LAUNCH button.
+- A design dock offers nine big choices in plain language: arm length, release speed, motor, launch angle, payload, body shape, heat shield, rocket stage and flight program. Ranges go far past what works (arms to 150 m, release speeds to 4 km/s) and there is one LAUNCH button.
+- **Launch is never refused for a bad idea.** Play mode rebuilds the hardware around your choices: a heavier payload or an added rocket stage gets a longer vehicle, and a longer arm or bigger vehicle gets a bigger chamber and exit port with the same clearances. Then the physics decides. An overstressed arm snaps during spin-up. An overloaded payload is crushed. A motor too weak for the target stalls ("launch aborted"). A tumbling vehicle is torn apart, and a fast one can burn up. Risky choices are marked ▲ but never blocked.
+- **No spoilers by default.** The outcome, the landing point and the predicted path stay hidden until you launch. 🔮 Forecast reveals the engineers' prediction, which comes from the same solver as the launch.
+- When something breaks, the screen shakes, a stamp names it ("Snap! The arm tore apart"), and the results card explains the real cause in plain words. It gives a realistic fix, with the engineering detail one click away.
 - A **world map** shows where it will land before you launch. The forecast comes from the prediction worker running the same solver: "Lands 11.5 km E of the launch site · 41 km ESE of Truth or Consequences". The map shows on land, at sea or in a lake, range rings, and nearby towns, rivers and borders. During flight the live ground track is drawn over the forecast. After the run, a pin marks where the vehicle actually came down. Orbital runs show the ground track of the validated orbit. Open it full screen with the mini-map's ⤢ button, the **Map** button, or `M`.
 - During flight a HUD shows the phase, progress, altitude, speed, g-force and nose temperature, with pop-ups for milestones. The camera follows the action: machine → world → orbit.
 - After each run a results card shows stars, a plain-language reason with a tip, unlocks, and *Launch again* / *Next mission*.
@@ -128,7 +131,7 @@ Executed in the development container (Linux, Node 22.22, 4 vCPU) on 2026-10-11:
 |---|---|---|
 | Type-check | `npm run typecheck` | clean (TypeScript 5.9.3, strict) |
 | Unit and integration tests | `npm test` | **110 passed** in 13 files (Vitest 4.0.18), including the production server, ground-track map and worker-fallback tests |
-| Numerical validation | `npm run validate` | see [docs/VALIDATION.md](docs/VALIDATION.md): ten-orbit energy drift 2.6e-10, angular-momentum drift 1.3e-10, radial apogee 210.3861 km, drag-decay error 1e-11, all 5 missions pass, all 10 failure cases fail as specified |
+| Numerical validation | `npm run validate` | see [docs/VALIDATION.md](docs/VALIDATION.md): ten-orbit energy drift 2.6e-10, angular-momentum drift 1.3e-10, radial apogee 210.3861 km, drag-decay error 1e-11, all 5 missions pass, all 11 failure cases (including the new drive stall) fail as specified |
 | Production build | `npm run build` | `dist/` ≈ 326 KB gzip main bundle + 116 KB worker; the world map is a separate ≈ 197 KB gzip chunk, loaded only when a map is shown |
 | Browser tests | `npm run test:browser` | **3 passed**: Play flow (home → mission → landing forecast on the mini-map → launch → results with stars and landing point → full-screen map → next mission), Engineer flow (prediction, launch, launcher/world/orbit/map views, analysis), invalid-configuration diagnostic. Served from `dist/` under `/centrifuge/`. |
 

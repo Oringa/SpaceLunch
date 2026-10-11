@@ -13,7 +13,8 @@ export type FailureKind =
   | 'unstable-flight'
   | 'propellant-exhausted'
   | 'ground-contact'
-  | 'numerical';
+  | 'numerical'
+  | 'drive-stall';
 
 export const FAILURE_LABEL: Record<FailureKind, string> = {
   'component-load': 'Component load envelope exceeded',
@@ -26,6 +27,7 @@ export const FAILURE_LABEL: Record<FailureKind, string> = {
   'propellant-exhausted': 'Propellant exhausted before target',
   'ground-contact': 'Ground contact before objective',
   'numerical': 'Numerical integration failure',
+  'drive-stall': 'Launch aborted: drive stalled below the target speed',
 };
 
 export const fmtPa = (p: number): string => (p >= 1000 ? `${(p / 1000).toPrecision(3)} kPa` : p >= 1 ? `${p.toPrecision(3)} Pa` : `${p.toExponential(1)} Pa`);

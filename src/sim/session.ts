@@ -19,7 +19,7 @@ import { FlightModel, FS, type FlightDerived, type FlightDiscrete } from '../phy
 import { orbitalElements, type OrbitElements } from '../physics/orbit';
 import { type Vec3, add, cross, dot, norm, scale, sub } from '../physics/vec3';
 import { THERMAL_FLAG_LOW_SPEED, THERMAL_FLAG_RAREFIED } from '../physics/thermal';
-import type { Scenario } from './build';
+import { STALL_FRACTION, type Scenario } from './build';
 import { TelemetryTable, ROTOR_CHANNELS, FLIGHT_CHANNELS } from './telemetry';
 
 export type Phase = 'pumpdown' | 'spinup' | 'hold' | 'corridor' | 'flight' | 'ended';
@@ -470,6 +470,25 @@ export class Session {
     const rotorEvent = (e: EventSpec): void => {
       this.rotorEvents.push(e);
     };
+    const wStall = s.stallOmega;
+    if (wStall !== null) {
+      rotorEvent({
+        id: 'drive-stall', dir: 1, terminal: true, active: () => this.phase === 'spinup',
+        g: (_t, y) => y[RS.OMEGA] - STALL_FRACTION * wStall,
+        handler: (t, y) => {
+          const P = s.rotor.motor.electricalPowerW;
+          this.fail({
+            kind: 'drive-stall', t, criterion: 'Drive cannot reach the target speed', value: y[RS.OMEGA] * R, threshold: s.config.launcher.targetTipSpeedMps, unit: 'm/s',
+            message: `Launch aborted: spin-up stalled at ${(y[RS.OMEGA] * R).toFixed(0)} m/s of the ${s.config.launcher.targetTipSpeedMps.toFixed(0)} m/s target. Near ${(wStall * R).toFixed(0)} m/s, bearing friction and drag from the residual gas absorb all ${(P / 1e6).toFixed(1)} MW of drive power, so the arm cannot go faster.`,
+            contributing: [
+              { label: 'Drive power', value: `${(P / 1e6).toFixed(1)} MW` },
+              { label: 'Top speed this drive can hold', value: `${(wStall * R).toFixed(0)} m/s` },
+              { label: 'Rotor inertia', value: `${(s.rotorDerived.inertia / 1e6).toFixed(2)} × 10⁶ kg·m²` },
+            ],
+          });
+        },
+      });
+    }
     rotorEvent({
       id: 'arm-stress-warning', dir: 1, terminal: false, active: () => true,
       g: (_t, y) => y[RS.OMEGA] - wWarn,

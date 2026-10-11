@@ -189,7 +189,7 @@ Uncertainty and weather are sampled once per run from named seeded streams, neve
 
 ## 6. Failure criteria
 
-Named, never random: component load envelope (peak, and load-duration during spin-up), modelled structural limit (arm stress), bearing transient envelope, exit collision (port or chamber wall), aerodynamic overload (dynamic pressure or normal force), thermal envelope (nose, body, payload bay), unstable flight (angle of attack above the envelope while dynamic pressure is above its threshold), propellant exhausted before target, and ground contact before the objective. The run stops at the first failed criterion and the autopsy reports value vs threshold, time and contributing conditions.
+Named, never random: component load envelope (peak, and load-duration during spin-up), modelled structural limit (arm stress), bearing transient envelope, exit collision (port or chamber wall), aerodynamic overload (dynamic pressure or normal force), thermal envelope (nose, body, payload bay), unstable flight (angle of attack above the envelope while dynamic pressure is above its threshold), propellant exhausted before target, ground contact before the objective, and drive stall (the drive cannot reach the target speed: spin-up levels off where drive power balances bearing and residual-gas losses; the run is aborted at 98.5 % of that equilibrium speed). The run stops at the first failed criterion and the autopsy reports value vs threshold, time and contributing conditions.
 
 ## 7. Validation
 

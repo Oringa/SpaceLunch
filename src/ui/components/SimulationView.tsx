@@ -29,7 +29,11 @@ function makeSource(ctl: Controller, variant: 'engineer' | 'play'): RenderSource
       return st.scenario;
     },
     flown: () => (ctl.store.get().run.status === 'idle' ? null : ctl.flightTable),
-    predicted: () => (ctl.store.get().overlays.predicted ? ctl.store.get().prediction.flight ?? null : null),
+    predicted: () => {
+      const st = ctl.store.get();
+      const show = variant === 'play' ? st.forecastShown : st.overlays.predicted;
+      return show ? st.prediction.flight ?? null : null;
+    },
     ghosts: () => (ctl.store.get().overlays.ghosts ? ctl.store.get().ghosts.map((g) => ({ table: g.flight, color: g.color, label: g.label })) : []),
     // The map is drawn by the UI layer; the 3D renderer is paused behind it.
     view: () => { const v = ctl.store.get().view; return v === 'map' ? 'world' : v; },

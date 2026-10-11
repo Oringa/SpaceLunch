@@ -1,6 +1,6 @@
 {
   "modelVersion": "centrifuge-model-1.0.0",
-  "generated": "2026-10-11T08:24:07.392Z",
+  "generated": "2026-10-11T11:05:55.024Z",
   "node": "v22.22.0",
   "reference": [
     [
@@ -52,31 +52,31 @@
       "id": "m1-clean-release",
       "passed": true,
       "key": "apogee 12.4 km",
-      "wallMs": 826.229452
+      "wallMs": 1071.616662
     },
     {
       "id": "m2-thirty-km",
       "passed": true,
       "key": "apogee 38.4 km",
-      "wallMs": 1207.614189
+      "wallMs": 1503.71271
     },
     {
       "id": "m3-edge-of-space",
       "passed": true,
       "key": "apogee 120.8 km",
-      "wallMs": 1295.9627870000004
+      "wallMs": 1432.6959530000004
     },
     {
       "id": "m4-leo",
       "passed": true,
       "key": "orbit 204.9 × 371.7 km",
-      "wallMs": 807.0858019999996
+      "wallMs": 917.4056799999998
     },
     {
       "id": "m5-optimise",
       "passed": true,
       "key": "orbit 204.9 × 362.0 km",
-      "wallMs": 666.8630279999998
+      "wallMs": 748.6588460000003
     }
   ]
 }

@@ -360,6 +360,8 @@ button, input, select { font: inherit; color: inherit; }
 .prediction-pill.ok { border-color: rgba(95, 211, 141, 0.5); color: #c9f2d9; }
 .prediction-pill.bad { border-color: rgba(255, 107, 107, 0.55); color: #ffd0d0; }
 .prediction-pill.wait { color: #b9c6d6; }
+.prediction-pill.hidden { color: #e8eef5; border-color: rgba(255, 180, 84, 0.35); }
+.forecast-btn[aria-pressed='true'] { border-color: rgba(76, 201, 240, 0.6); color: #bfeeff; }
 .launch-btn { min-width: 220px; padding: 14px 30px; border: 0; border-radius: 14px; cursor: pointer; font: 900 20px/1 var(--sans); letter-spacing: 0.22em; color: #1a0f04; background: linear-gradient(180deg, #ffc978, var(--hot) 45%, var(--hot2)); box-shadow: 0 8px 30px rgba(255, 140, 60, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.5); animation: pulse 2.4s ease-in-out infinite; }
 .launch-btn:hover:not(:disabled) { filter: brightness(1.08); }
 .launch-btn:disabled { background: #3a4452; color: #8b97a6; box-shadow: none; animation: none; cursor: not-allowed; }
@@ -409,7 +411,11 @@ button, input, select { font: inherit; color: inherit; }
 .star.on { color: #e8eef5; }
 .star.on span { color: #ffd166; }
 .star small { color: #7e8fa3; margin-left: 6px; }
-.results-why { margin: 0; font-size: 13px; color: #ffd0d0; }
+.results-why { display: grid; gap: 6px; font-size: 14px; color: #ffe1e1; text-align: left; }
+.results-why p { margin: 0; }
+.results-why details { font-size: 12px; color: #b9c6d6; }
+.results-why summary { cursor: pointer; color: #9fb0c3; }
+.results-stamp { justify-self: center; font: 900 13px/1 var(--sans); letter-spacing: 0.32em; color: #ff8f8f; border: 2px solid rgba(255, 107, 107, 0.7); padding: 6px 12px 6px 16px; border-radius: 6px; transform: rotate(-3deg); }
 .results-tip { margin: 0; font-size: 13.5px; color: #e8eef5; background: rgba(76, 201, 240, 0.08); border: 1px solid rgba(76, 201, 240, 0.3); padding: 10px 12px; border-radius: 12px; text-align: left; }
 .results-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .stat { padding: 8px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--glass-line); }
@@ -501,3 +507,16 @@ button, input, select { font: inherit; color: inherit; }
 .landing-line > span:nth-child(2) { flex: 1; }
 .landing-line small { color: #9fb0c3; }
 .landing-pin { font-size: 20px; }
+
+/* ---------------------------------------------------------------- failure moment */
+.play.fail-shake .renderer-host { animation: fail-shake 0.6s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+.play.fail-shake::after { content: ''; position: absolute; inset: 0; z-index: 13; pointer-events: none; background: radial-gradient(circle at 50% 50%, rgba(255, 120, 80, 0.45), rgba(255, 60, 60, 0.18) 45%, transparent 75%); animation: flash 0.6s ease-out forwards; }
+@keyframes fail-shake { 10%, 90% { transform: translate(-2px, 1px); } 20%, 80% { transform: translate(5px, -3px); } 30%, 50%, 70% { transform: translate(-9px, 4px) rotate(-0.4deg); } 40%, 60% { transform: translate(9px, -4px) rotate(0.4deg); } }
+.fail-stamp { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%); z-index: 17; display: grid; gap: 6px; justify-items: center; padding: 18px 28px 14px; border-radius: 18px; cursor: pointer; color: #fff; background: rgba(20, 6, 8, 0.72); border: 1px solid rgba(255, 107, 107, 0.55); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), 0 0 60px rgba(255, 80, 60, 0.25); backdrop-filter: blur(4px); animation: stamp-in 0.4s cubic-bezier(0.2, 1.5, 0.4, 1); max-width: calc(100% - 32px); }
+.fail-stamp-k { font: 900 clamp(26px, 5vw, 44px)/1 var(--sans); letter-spacing: 0.14em; color: #ff6b6b; text-shadow: 0 0 24px rgba(255, 80, 60, 0.6); transform: rotate(-2deg); }
+.fail-stamp-t { font: 800 clamp(16px, 2.4vw, 22px)/1.2 var(--sans); text-align: center; }
+.fail-stamp-hint { font-size: 11.5px; color: #c9b1b1; }
+@keyframes stamp-in { from { transform: translate(-50%, -50%) scale(1.8) rotate(4deg); opacity: 0; } to { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .fail-stamp { animation: none; }
+}

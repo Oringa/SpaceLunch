@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { designById } from '../data/designs';
 import { baseConfig } from '../data/defaults';
-import { buildScenario, ConfigError } from '../sim/build';
+import { buildScenario, ConfigError, STALL_FRACTION } from '../sim/build';
 import { Session } from '../sim/session';
 import { cloneConfig } from '../sim/config';
 import { importConfig, exportConfig, validateConfig } from '../sim/validate';
@@ -107,16 +107,28 @@ describe('rotor and vacuum models', () => {
     expect(Math.abs(integ.y[0] - v.targetPressure) / v.targetPressure).toBeLessThan(1e-6);
     expect(pressureAt(v, pd.time)).toBeCloseTo(v.targetPressure, 6);
   });
-  it('infeasible vacuum target and unreachable tip speed are reported, not fixed', () => {
+  it('an infeasible vacuum target is refused; an unreachable tip speed launches and stalls', () => {
     const c = designById('instrument-hop');
     c.launcher.vacuum.targetPressurePa = 1e-4;
     expect(buildScenario(c).ok).toBe(false);
-    const d = designById('instrument-hop');
-    d.launcher.targetTipSpeedMps = 2500;
-    d.launcher.vacuum.targetPressurePa = 900;
+    // A drive too weak for the target is a playable outcome: warned, launched, aborted at the stall.
+    const d = designById('thirty-km');
+    d.launcher.motorId = 'drive-1mw';
+    d.launcher.targetTipSpeedMps = 2600;
     const sd = buildScenario(d);
-    expect(sd.ok).toBe(false);
-    expect(sd.issues.some((i) => /not reachable/.test(i.message))).toBe(true);
+    expect(sd.ok).toBe(true);
+    expect(sd.stallOmega).not.toBeNull();
+    expect(sd.issues.some((i) => i.level === 'warning' && /beyond this drive/.test(i.message))).toBe(true);
+    expect(Number.isFinite(sd.derived.spinupTimeEstimate)).toBe(true);
+    const s = new Session(sd);
+    s.runToEnd();
+    expect(s.terminal).toBe('failure');
+    expect(s.failure?.kind).toBe('drive-stall');
+    const vStall = sd.derived.equilibriumTipSpeed;
+    expect(s.failure!.value).toBeLessThan(2600);
+    expect(Math.abs(s.failure!.value / vStall - STALL_FRACTION)).toBeLessThan(1e-3);
+    expect(s.failure!.t - (s.events.find((e) => e.kind === 'spinup-start')?.t ?? 0)).toBeLessThan(2 * sd.derived.spinupTimeEstimate);
+    expect(s.releaseRecord).toBeUndefined();
   });
   it('release keeps rotor angular speed continuous (no spurious spin-up of the remaining rotor)', () => {
     const s = new Session(buildScenario(designById('instrument-hop')));

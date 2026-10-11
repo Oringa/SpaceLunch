@@ -4,7 +4,7 @@
  */
 import type { SimConfig } from '../sim/config';
 import type { FailureKind } from '../sim/session';
-import { instrumentHop, edgeOfSpace, leoReference } from './designs';
+import { instrumentHop, thirtyKm, edgeOfSpace, leoReference } from './designs';
 
 export interface FailureCase {
   id: string;
@@ -15,6 +15,11 @@ export interface FailureCase {
 }
 
 export const FAILURE_CASES: FailureCase[] = [
+  {
+    id: 'fail-drive-stall', expected: 'drive-stall', title: 'Small motor, big ambition',
+    lesson: 'A drive can only spin the rotor up to the speed where its power is eaten by bearing friction and gas drag; beyond that the launch is aborted.',
+    make: () => { const c = thirtyKm(); c.name = 'Failure: 1 MW drive at 2.6 km/s'; c.launcher.motorId = 'drive-1mw'; c.launcher.targetTipSpeedMps = 2600; return c; },
+  },
   {
     id: 'fail-component-load', expected: 'component-load', title: 'Ordinary avionics on a centrifuge',
     lesson: 'Unhardened electronics cannot sit at thousands of g for the minutes a spin-up takes.',

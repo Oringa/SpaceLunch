@@ -25,7 +25,7 @@ import { streamRng } from '../physics/random';
 import { Dopri5 } from '../physics/integrator';
 import { add, scale, type Vec3 } from '../physics/vec3';
 import { ecefToEci } from '../physics/frames';
-import { type SimConfig, SCHEMA_VERSION } from './config';
+import { type SimConfig, type VehicleConfig, SCHEMA_VERSION } from './config';
 import { estimateCosts, type CostBreakdown } from '../game/costs';
 
 export type IssueLevel = 'error' | 'warning' | 'info';
@@ -91,10 +91,15 @@ export interface DerivedSummary {
   inclinationEstimateDeg: number;
 }
 
+/** Spin-up counts as stalled once the rotor reaches this fraction of the drive's equilibrium speed. */
+export const STALL_FRACTION = 0.985;
+
 export interface Scenario {
   config: SimConfig;
   issues: BuildIssue[];
   ok: boolean;
+  /** Equilibrium rotor speed (rad/s) when the drive cannot reach the target; null otherwise. */
+  stallOmega: number | null;
   geometry: LauncherGeometry;
   rotor: RotorParams;
   rotorDerived: RotorDerived;
@@ -118,6 +123,17 @@ const err = (issues: BuildIssue[], path: string, message: string): void => {
 const warn = (issues: BuildIssue[], path: string, message: string): void => {
   issues.push({ level: 'warning', path, message });
 };
+
+/** Radius of the vehicle's cross-section envelope including fins (m): what must pass the exit aperture. */
+export function vehicleEnvelopeRadius(V: Pick<VehicleConfig, 'diameterM' | 'finsId'>): number {
+  const finSpan = V.finsId === 'none' ? 0 : (V.finsId === 'large-tail' ? 0.8 : 0.55) * V.diameterM;
+  return V.diameterM / 2 + finSpan;
+}
+
+/** Farthest point of the vehicle from the hub axis when mounted at arm radius R (m): what the chamber must clear. */
+export function vehicleCornerRadius(R: number, V: Pick<VehicleConfig, 'diameterM' | 'lengthM'>): number {
+  return Math.hypot(R + V.diameterM / 2, V.lengthM / 2);
+}
 
 function scaledFamily(f: AeroFamily, cdScale: number, cnScale: number): AeroFamily {
   if (cdScale === 1 && cnScale === 1) return f;
@@ -182,8 +198,7 @@ export function buildScenario(config: SimConfig): Scenario {
   const R = L.armRadiusM;
   if (!(R >= 5 && R <= 150)) err(issues, 'launcher.armRadiusM', `Arm radius ${R} m is outside the supported 5-150 m range.`);
   if (!(L.targetTipSpeedMps > 0)) err(issues, 'launcher.targetTipSpeedMps', 'Target tip speed must be positive.');
-  const halfL = V.lengthM / 2;
-  const cornerR = Math.hypot(R + V.diameterM / 2, halfL);
+  const cornerR = vehicleCornerRadius(R, V);
   if (L.chamberRadiusM < cornerR + 0.25) {
     err(issues, 'launcher.chamberRadiusM', `Chamber radius ${L.chamberRadiusM.toFixed(2)} m does not clear the vehicle envelope on the arm (needs at least ${(cornerR + 0.25).toFixed(2)} m for a ${V.lengthM} m vehicle at R = ${R} m).`);
   }
@@ -191,8 +206,7 @@ export function buildScenario(config: SimConfig): Scenario {
   if (F.elevationDeg < 5 || F.elevationDeg > 90) err(issues, 'flightPlan.elevationDeg', 'Elevation must be between 5 and 90 degrees (the exit tunnel must point upward).');
   if (L.arm.tipAreaM2 <= 0 || L.arm.rootAreaM2 <= 0) err(issues, 'launcher.arm', 'Arm section areas must be positive.');
   if (L.arm.rootAreaM2 < L.arm.tipAreaM2) warn(issues, 'launcher.arm.rootAreaM2', 'Root area smaller than tip area: the arm thins toward the hub, where tension is highest.');
-  const finSpan = V.finsId === 'none' ? 0 : (V.finsId === 'large-tail' ? 0.8 : 0.55) * V.diameterM;
-  const envelopeRadius = V.diameterM / 2 + finSpan;
+  const envelopeRadius = vehicleEnvelopeRadius(V);
   if (L.exit.apertureRadiusM <= envelopeRadius) {
     err(issues, 'launcher.exit.apertureRadiusM', `Exit aperture radius ${(L.exit.apertureRadiusM * 100).toFixed(0)} cm does not exceed the vehicle envelope radius ${(envelopeRadius * 100).toFixed(0)} cm (body + fins).`);
   }
@@ -261,8 +275,11 @@ export function buildScenario(config: SimConfig): Scenario {
     warn(issues, 'launcher.arm', `Arm stress ${(Math.max(sigmaMax, sigmaCounter) / 1e9).toFixed(2)} GPa violates the safety-factor margin (allowable ${(allow / 1e9).toFixed(2)} GPa at SF ${L.structure.safetyFactor}). This is a margin warning, not a modelled fracture.`);
   }
   const wEq = equilibriumSpeed(rotor, rd);
-  if (wEq < omegaT * (1 - L.release.armingTolerance)) {
-    err(issues, 'launcher.targetTipSpeedMps', `Target tip speed ${L.targetTipSpeedMps.toFixed(0)} m/s is not reachable: drive power ${(motor.electricalPowerW / 1e6).toFixed(1)} MW balances bearing and gas losses at ${(wEq * R).toFixed(0)} m/s.`);
+  // A drive too weak for the target is a playable outcome, not an input error:
+  // spin-up levels off near the equilibrium speed and the launch is aborted.
+  const stallOmega = wEq < omegaT * (1 - L.release.armingTolerance) ? wEq : null;
+  if (stallOmega !== null) {
+    warn(issues, 'launcher.targetTipSpeedMps', `Target tip speed ${L.targetTipSpeedMps.toFixed(0)} m/s is beyond this drive: ${(motor.electricalPowerW / 1e6).toFixed(1)} MW balances bearing and gas losses at ${(wEq * R).toFixed(0)} m/s. Spin-up will stall there and the launch will be aborted.`);
   }
   const maxTan = (motorTorqueAvailable(motor, 0) / rd.inertia) * R;
   if (maxTan > L.structure.maxTipTangentialAccel) {
@@ -361,7 +378,7 @@ export function buildScenario(config: SimConfig): Scenario {
   const dvTotal = stageDv.reduce((a, b) => a + b, 0);
   const path = geometry.sEnd;
   const margin = L.exit.apertureRadiusM - envelopeRadius;
-  const spin = estimateSpinup(rotor, rd, omegaT, L.release.armingTolerance);
+  const spin = estimateSpinup(rotor, rd, omegaT, L.release.armingTolerance, stallOmega !== null ? STALL_FRACTION * stallOmega : undefined);
   const latRad = geometry.lat;
   const sinAz = Math.sin(geometry.azimuth);
   const cosI = Math.cos(latRad) * sinAz;
@@ -411,7 +428,7 @@ export function buildScenario(config: SimConfig): Scenario {
     inclinationEstimateDeg: incl,
   };
   const scenario: Scenario = {
-    config: c, issues, ok: !issues.some((i) => i.level === 'error'), geometry, rotor, rotorDerived: rd, omegaTarget: omegaT,
+    config: c, issues, ok: !issues.some((i) => i.level === 'error'), geometry, rotor, rotorDerived: rd, omegaTarget: omegaT, stallOmega,
     vehicle, massModel, payload, vacuum, atmosphere, wind, guidance, release, derived, uncertaintyDraws: draws, stages,
   };
   derived.costs = estimateCosts(scenario);
@@ -431,13 +448,14 @@ export class ConfigError extends Error {
 }
 
 /** Spin-up estimate with the same rotor ODE and integrator as the authoritative run. */
-export function estimateSpinup(p: RotorParams, d: RotorDerived, omegaT: number, tol: number): { time: number; energy: number } {
+/** Time and energy to reach the arming band, or `stopOmega` (rad/s) when given (a stalling drive). */
+export function estimateSpinup(p: RotorParams, d: RotorDerived, omegaT: number, tol: number, stopOmega = omegaT * (1 - tol)): { time: number; energy: number } {
   const atol = new Float64Array([1e-6, 1e-8, 1, 1, 1, 1]);
   const integ = new Dopri5(RS.N, (_t, y, dy) => rotorDerivative(p, d, omegaT, true, y, dy), { rtol: 1e-8, atol, hMax: 2, hMin: 1e-9 });
   integ.reset(0, new Float64Array(RS.N));
   for (let i = 0; i < 200000 && integ.t < 6 * 3600; i++) {
     integ.step();
-    if (integ.y[RS.OMEGA] >= omegaT * (1 - tol)) return { time: integ.t, energy: integ.y[RS.E_ELEC] };
+    if (integ.y[RS.OMEGA] >= stopOmega) return { time: integ.t, energy: integ.y[RS.E_ELEC] };
   }
   return { time: Infinity, energy: Infinity };
 }

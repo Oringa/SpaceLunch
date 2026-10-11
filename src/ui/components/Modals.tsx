@@ -77,6 +77,12 @@ export function Help({ ctl }: { ctl: Controller }) {
       </p>
       <h3>Loop</h3>
       <p style={{ margin: 0 }}>Configure → predict (same solver) → launch → watch spin-up, release and flight → read the autopsy → change one cause → compare.</p>
+      <h3>Play mode</h3>
+      <p style={{ margin: 0 }}>
+        Nothing stops you launching a bad idea: the machine is rebuilt around your choices and the physics decides. Arms snap,
+        payloads get crushed, weak motors stall, and vehicles tumble or burn up. The outcome stays hidden until you launch;
+        🔮 Forecast shows the engineers' prediction, from the same solver.
+      </p>
       <h3>Keyboard</h3>
       <ul>
         <li><span className="kbd">L</span> launch · <span className="kbd">Space</span> play/pause · <span className="kbd">R</span> reset</li>

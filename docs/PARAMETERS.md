@@ -7,9 +7,9 @@ Every parameter is a build-time cause (locked during a run). Derived consequence
 
 | Parameter | Symbol | Path | SI unit | Display | Range | Tier | Class | Description |
 |---|---|---|---|---|---|---|---|---|
-| Effective arm radius | R | `launcher.armRadiusM` | m | m | 10 – 100 | primary | Fictional game hardware | Distance from the hub axis to the vehicle centre of mass (not the chamber radius or diameter). Sets omega = v/R and a = v²/R. Constrained by: `launcher.chamberRadiusM`. |
-| Target tip speed | v_tip | `launcher.targetTipSpeedMps` | m/s | m/s | 200 – 2500 | primary | Physical law | Commanded release speed. Whether it is reachable depends on drive power, torque, losses and structural limits; infeasible commands are reported, not fixed. |
-| Chamber inner radius | R_c | `launcher.chamberRadiusM` | m | m | 8 – 110 | detail | Fictional game hardware | Inner radius of the vacuum vessel. Must clear the vehicle on the arm. Sets chamber volume (pump-down) and the free path to the exit wall. Constrained by: `launcher.armRadiusM`, `vehicle.lengthM`. |
+| Effective arm radius | R | `launcher.armRadiusM` | m | m | 10 – 150 | primary | Fictional game hardware | Distance from the hub axis to the vehicle centre of mass (not the chamber radius or diameter). Sets omega = v/R and a = v²/R. Constrained by: `launcher.chamberRadiusM`. |
+| Target tip speed | v_tip | `launcher.targetTipSpeedMps` | m/s | m/s | 200 – 4000 | primary | Physical law | Commanded release speed. Whether it is reachable depends on drive power, torque, losses and structural limits; infeasible commands are reported, not fixed. |
+| Chamber inner radius | R_c | `launcher.chamberRadiusM` | m | m | 8 – 160 | detail | Fictional game hardware | Inner radius of the vacuum vessel. Must clear the vehicle on the arm. Sets chamber volume (pump-down) and the free path to the exit wall. Constrained by: `launcher.armRadiusM`, `vehicle.lengthM`. |
 | Chamber axial depth | w_c | `launcher.chamberDepthM` | m | m | 1 – 20 | detail | Fictional game hardware | Depth of the disc-shaped chamber along the rotor axis. |
 | Chamber pressure | p_c | `launcher.vacuum.targetPressurePa` | Pa | Pa | 0.01 – 1000 (log) | detail | Engineering approximation | Absolute pressure at launch. Lower pressure cuts residual-gas drag on the arm but lengthens pump-down. |
 | Pumping speed | S | `launcher.vacuum.pumpSpeedM3s` | m³/s | m³/s | 1 – 2000 (log) | detail | Engineering approximation | Constant effective pumping speed (an idealisation: real pumps lose speed at low pressure). |
@@ -91,6 +91,7 @@ Every parameter is a build-time cause (locked during a run). Derived consequence
 
 | Parameter | Symbol | Path | SI unit | Display | Range | Tier | Class | Description |
 |---|---|---|---|---|---|---|---|---|
+| Flight-dynamics fidelity | — | `fidelity` | - | — | `engineering`, `assisted` | detail | Physical law | Engineering integrates attitude with Euler's rigid-body equation and finite control authority. Assisted prescribes orientation (zero angle of attack, instant thrust pointing): an idealisation that is labelled and kept in separate records. |
 | Run seed | — | `seed` | - | — | 0 – 1000000000 | detail | Fictional game hardware | Seeds release jitter, mount error and (if enabled) hardware uncertainty. |
 | Atmosphere and aerodynamic heating | — | `physics.atmosphere` | - | — | on/off | detail | Physical law | Disable for the vacuum thought experiment (gravity and orbital mechanics stay). Records are kept separate. |
 | Earth rotation | — | `physics.earthRotation` | - | — | on/off | expert | Physical law | Disable to isolate rotation effects. Records are kept separate. |

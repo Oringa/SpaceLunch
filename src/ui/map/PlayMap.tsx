@@ -10,15 +10,17 @@ function useCaption(ctl: Controller): { title: string; main: string; sub: string
   const { forecast, actual, scene } = useTrackEnds(ctl, world);
   const pred = useStore(ctl.store, (s) => s.prediction);
   const configVersion = useStore(ctl.store, (s) => s.configVersion);
+  const shown = useStore(ctl.store, (s) => s.forecastShown);
   if (scene.finished) {
     if (!actual) return { title: 'Ground track', main: 'No flight: the vehicle never left the machine', sub: '', tone: 'done' };
     return { title: 'Where it ended', main: endHeadline(actual, false), sub: endNear(actual), tone: 'done' };
   }
   if (scene.live) {
-    const fc = forecast && forecast.kind !== 'running' ? `Forecast: ${lower(endHeadline(forecast, true))}` : '';
+    const fc = shown && forecast && forecast.kind !== 'running' ? `Forecast: ${lower(endHeadline(forecast, true))}` : '';
     if (!actual) return { title: 'Ground track', main: 'Waiting for release…', sub: fc, tone: 'live' };
     return { title: 'Ground track · live', main: endHeadline(actual, false), sub: fc || endNear(actual), tone: 'live' };
   }
+  if (!shown) return { title: 'Launch site', main: 'Where will it come down? Launch to find out.', sub: '🔮 Forecast shows the engineers\' prediction', tone: 'wait' };
   if (pred.status === 'running' || pred.configVersion !== configVersion) return { title: 'Landing forecast', main: 'Forecasting…', sub: '', tone: 'wait' };
   if (!forecast) return { title: 'Landing forecast', main: pred.status === 'done' ? 'No flight in the forecast: it fails before release' : 'Forecast unavailable', sub: '', tone: 'wait' };
   return { title: 'Landing forecast', main: endHeadline(forecast, true), sub: endNear(forecast), tone: 'fc' };

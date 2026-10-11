@@ -14,6 +14,7 @@ import type { CommandKind, RunSummary, SimEvent, Snapshot, TimedCommand } from '
 import { TelemetryTable, ROTOR_CHANNELS, FLIGHT_CHANNELS } from '../sim/telemetry';
 import { PREDICTION_CHANNELS } from '../workers/protocol';
 import { designById } from '../data/designs';
+import { fitToDesign } from '../game/autofit';
 import { evaluateWithStars, missionById, recordKey, type MissionResult } from '../game/missions';
 
 export type Tab = 'build' | 'flight' | 'analysis';
@@ -62,6 +63,8 @@ export interface AppState {
   autoCamera: boolean;
   /** Play mode: the full-screen ground-track map is open. */
   mapOpen: boolean;
+  /** Play mode: show the solver's forecast (outcome, landing point, predicted track) before launch. Off = find out by launching. */
+  forecastShown: boolean;
   /** Missions completed in this browser (any passing run). */
   completed: Record<string, number>;
   config: SimConfig;
@@ -105,6 +108,7 @@ const RECORDS_KEY = 'centrifuge.records.v1';
 const UIMODE_KEY = 'centrifuge.uimode.v1';
 const COMPLETED_KEY = 'centrifuge.completed.v1';
 const CONFIG_KEY = 'centrifuge.config.v1';
+const FORECAST_KEY = 'centrifuge.forecast.v1';
 
 function loadJSON<T>(key: string): T | null {
   try {
@@ -165,6 +169,7 @@ export class Controller {
       showHome: true,
       autoCamera: true,
       mapOpen: false,
+      forecastShown: loadJSON<boolean>(FORECAST_KEY) ?? false,
       completed: loadJSON(COMPLETED_KEY) ?? {},
       config,
       configVersion: 1,
@@ -253,6 +258,27 @@ export class Controller {
     const c = cloneConfig(this.config);
     setPath(c, path, value);
     this.setConfig(c);
+  }
+
+  /**
+   * Play-mode edit: the vehicle, chamber and exit port are rebuilt around the
+   * change (see game/autofit), so a bigger arm or payload never refuses launch.
+   */
+  setDesignParam(path: string, value: unknown): void {
+    const c = cloneConfig(this.config);
+    setPath(c, path, value);
+    let base: SimConfig;
+    try {
+      base = designById(this.store.get().designId);
+    } catch {
+      base = this.config;
+    }
+    this.setConfig(fitToDesign(base, c));
+  }
+
+  setForecastShown(v: boolean): void {
+    saveJSON(FORECAST_KEY, v);
+    this.store.set({ forecastShown: v });
   }
 
   getParam(path: string): unknown {

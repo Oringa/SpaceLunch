@@ -1,6 +1,6 @@
 # Validation results
 
-Model `centrifuge-model-1.0.0`, generated 2026-10-11T08:24Z on Node v22.22.0 by `npm run validate`. Values below are recomputed by the production kernel; `npm test` asserts the thresholds.
+Model `centrifuge-model-1.0.0`, generated 2026-10-11T11:05Z on Node v22.22.0 by `npm run validate`. Values below are recomputed by the production kernel; `npm test` asserts the thresholds.
 
 ## Synthetic reference case (R = 50 m, v = 2,000 m/s)
 
@@ -41,16 +41,17 @@ Max relative speed error vs v0/(1 + k v0 t) over 30 s: 9.58e-12.
 
 | Mission | Design | Passed | Key result | Wall time |
 |---|---|---|---|---|
-| 1. Clean release | instrument-hop | yes | apogee 12.4 km | 826 ms |
-| 2. Thirty kilometres on a budget | thirty-km | yes | apogee 38.4 km | 1208 ms |
-| 3. Edge of space | edge-of-space | yes | apogee 120.8 km | 1296 ms |
-| 4. Low Earth orbit | leo-reference | yes | orbit 204.9 × 371.7 km | 807 ms |
-| 5. Optimise delivered mass per credit | leo-optimised | yes | orbit 204.9 × 362.0 km | 667 ms |
+| 1. Clean release | instrument-hop | yes | apogee 12.4 km | 1072 ms |
+| 2. Thirty kilometres on a budget | thirty-km | yes | apogee 38.4 km | 1504 ms |
+| 3. Edge of space | edge-of-space | yes | apogee 120.8 km | 1433 ms |
+| 4. Low Earth orbit | leo-reference | yes | orbit 204.9 × 371.7 km | 917 ms |
+| 5. Optimise delivered mass per credit | leo-optimised | yes | orbit 204.9 × 362.0 km | 749 ms |
 
 ## Failure reference cases
 
 | Case | Expected | Observed | Message |
 |---|---|---|---|
+| Small motor, big ambition | drive-stall | drive-stall | Launch aborted: spin-up stalled at 1100 m/s of the 2600 m/s target. Near 1117 m/s, bearing friction and drag from the residual gas absorb all 1.0 MW of drive po |
 | Ordinary avionics on a centrifuge | component-load | component-load | Component load envelope exceeded: Payload (Ordinary avionics (not hardened)) stayed above its sustained limit 200 g for 5 s (current load 436 g). Spin-up and ho |
 | Aluminium arm at 1 km/s | structural-limit | structural-limit | Modelled structural limit exceeded: arm axial stress 0.57 GPa reached the Aluminium 7075-T6 threshold 0.57 GPa at tip speed 956 m/s, t = 11.9 min. |
 | Fixed counterbalance, small bearing | bearing-envelope | bearing-envelope | Bearing transient-load envelope exceeded at release: the departing 149 kg vehicle left an unbalanced static moment of 7470 kg·m, loading the hub bearing with 13 |

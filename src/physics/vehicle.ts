@@ -134,6 +134,23 @@ export class VehicleBuildError extends Error {}
 
 const TANK_FILL = 0.85;
 
+/** Length of the internal stack (payload + stages) at body diameter D, as buildVehicle lays it out (m). */
+export function internalStackLength(D: number, payloadMassKg: number, payloadBulkDensity: number, stages: StageSpec[]): number {
+  const gap = Math.max(0.01, 0.04 * D);
+  const rs = (D - 2 * gap) / 2;
+  const As = Math.PI * rs * rs;
+  let len = Math.max(0.08, payloadMassKg / (payloadBulkDensity * As));
+  for (const s of stages) len += s.propellantMass / s.propellantDensity / (As * TANK_FILL) + 0.06 + s.engineLength;
+  return len;
+}
+
+/** Shortest aeroshell of diameter D whose usable length (L - 0.6 x nose length) holds a stack (m). */
+export function minimumVehicleLength(fam: AeroFamily, D: number, stack: number): number {
+  const noseD = fam.noseLengthCalibers * D;
+  const L1 = stack + 0.6 * noseD; // nose shorter than half the body
+  return noseD <= 0.5 * L1 ? L1 : stack / 0.7; // otherwise the nose is capped at half the body
+}
+
 /** Lateral (wetted) area of the nose section. */
 function noseLateralArea(fam: AeroFamily, D: number, Ln: number): number {
   const r = D / 2;

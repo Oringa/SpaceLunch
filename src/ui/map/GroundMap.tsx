@@ -63,7 +63,8 @@ export function sceneOf(ctl: Controller): MapScene {
   const site = (st.run.status !== 'idle' && st.run.config ? st.run.config : st.config).site;
   const pred = st.prediction;
   const forecastFresh = pred.status === 'done' && pred.configVersion === st.configVersion;
-  const showForecast = st.uiMode === 'play' || st.overlays.predicted;
+  // Play mode keeps the outcome a surprise unless the player asked for the forecast.
+  const showForecast = st.uiMode === 'play' ? st.forecastShown : st.overlays.predicted;
   const forecast = showForecast && pred.flight ? cachedTrack(pred.flight, Infinity) : null;
   const live = st.run.status === 'live' || st.run.status === 'starting';
   const finished = st.run.status === 'finished';
