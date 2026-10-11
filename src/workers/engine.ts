@@ -26,10 +26,10 @@ function batchOf(table: TelemetryTable, name: 'rotor' | 'flight', from: number, 
   return { table: name, from, channels, columns: idx.map((i) => all[i]) };
 }
 
-/** Presentation-only time compression; never changes the physics. */
-export function autoRate(s: Session): number {
+/** Presentation-only time compression; never changes the physics. Uses the DISPLAYED phase and time. */
+export function autoRate(s: Session, displayT: number = s.t): number {
   const d = s.s.derived;
-  switch (s.phase) {
+  switch (s.phaseAt(displayT)) {
     case 'pumpdown':
       return Math.max(1, d.pump.time / 2.5);
     case 'spinup':
@@ -41,10 +41,10 @@ export function autoRate(s: Session): number {
       return 0.004;
     case 'flight': {
       const fl = s.flight!;
-      const t0 = s.releaseRecord?.t ?? s.t;
-      if (s.t - t0 < 1.5) return 0.25;
+      const t0 = s.releaseRecord?.t ?? displayT;
+      if (displayT - t0 < 1.5) return 0.25;
       if (fl.discrete.engineOn) return 12;
-      if (s.orbitInsertion) return 240;
+      if (s.orbitInsertion && displayT >= s.orbitInsertion.t) return 240;
       return 8;
     }
     default:
@@ -127,7 +127,7 @@ export class LiveRun {
   }
 
   currentRate(): number {
-    return this.mode.auto ? autoRate(this.session) : this.mode.rate;
+    return this.mode.auto ? autoRate(this.session, this.display) : this.mode.rate;
   }
 
   tick(): void {

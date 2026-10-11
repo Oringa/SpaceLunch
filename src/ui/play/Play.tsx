@@ -310,6 +310,7 @@ function FlightHud({ ctl }: { ctl: Controller }) {
   const view = useStore(ctl.store, (s) => s.view);
   const autoCam = useStore(ctl.store, (s) => s.autoCamera);
   const missionId = useStore(ctl.store, (s) => s.missionId);
+  const events = useStore(ctl.store, (s) => s.events);
   const snap = ctl.snapshot;
   const b = phaseBanner(ctl);
   const v = snap?.vehicle;
@@ -347,8 +348,12 @@ function FlightHud({ ctl }: { ctl: Controller }) {
       </div>
       {m && (
         <div className="hud-right">
-          <div className="hud-obj-title">Mission {m.index}</div>
-          {m.constraints.map((c) => <div key={c} className="hud-obj">○ {c}</div>)}
+          <div className="hud-obj-title">Mission {m.index} · milestones</div>
+          {(MILESTONES[m.id] ?? []).map(([kind, label]) => {
+            const done = events.some((e) => e.kind === kind);
+            const failed = events.some((e) => e.severity === 'failure');
+            return <div key={kind} className={`hud-obj${done ? ' done' : failed ? ' miss' : ''}`}>{done ? '✓' : failed ? '✖' : '○'} {label}</div>;
+          })}
         </div>
       )}
       <div className="hud-controls">
@@ -367,6 +372,14 @@ function FlightHud({ ctl }: { ctl: Controller }) {
     </>
   );
 }
+
+const MILESTONES: Record<string, Array<[string, string]>> = {
+  'm1-clean-release': [['at-speed', 'Up to speed'], ['clean-release', 'Clean exit through the port'], ['apogee', 'Reach the peak intact']],
+  'm2-thirty-km': [['clean-release', 'Clean exit'], ['alt-30km', 'Reach 30 km'], ['apogee', 'Peak']],
+  'm3-edge-of-space': [['clean-release', 'Clean exit'], ['alt-30km', '30 km'], ['alt-100km', 'Cross 100 km']],
+  'm4-leo': [['clean-release', 'Clean exit'], ['ignition', 'Rocket ignition'], ['alt-100km', 'Cross 100 km'], ['orbit-insertion', 'Orbit insertion'], ['orbit-validated', 'One full orbit']],
+  'm5-optimise': [['clean-release', 'Clean exit'], ['ignition', 'Rocket ignition'], ['orbit-insertion', 'Orbit insertion'], ['orbit-validated', 'One full orbit']],
+};
 
 function Big({ label, value }: { label: string; value: string }) {
   return (

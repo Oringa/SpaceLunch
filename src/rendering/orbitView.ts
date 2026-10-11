@@ -18,7 +18,7 @@ import { Projection, disposeTree, eciRows, hasTrajectory, pxPerUnit } from './pr
 import { Track, type RowMapper } from './track';
 import { createEarthGeometry, createEarthMaterial, createShellMaterial, setGraticule } from './earth';
 import { COLORS, Overlay, type BannerVariant, fmtInt, fmtKm, makeLabel, setLabelText } from './style';
-import { type FrameContext, type View, makeDot, makeRing, setDot } from './viewBase';
+import { type FrameContext, type View, applyFraming, makeDot, makeGlow, makeRing, setDot, usableFraction } from './viewBase';
 import { maxRow } from './worldView';
 
 const KM = 1e-3;
@@ -66,6 +66,11 @@ export class OrbitView implements View {
   private readonly vehicleDot = makeDot(COLORS.flown, 8);
   private readonly vehicleLabel = makeLabel('', 'amber', [-0.1, 1.1]);
   private readonly cursorRing = makeRing('#ffffff', 14);
+  private readonly vehicleGlow = makeGlow(COLORS.flown, 40);
+  private readonly goalRing = new Track({ color: '#ffd166', width: 1.8, opacity: 0.9, renderOrder: 4 });
+  private readonly goalLabel = makeLabel('', 'release', [0, 0.5]);
+  private goalKey = '';
+  private variant: 'engineer' | 'play' = 'engineer';
   private conicKey = '';
   private bandKey = '';
   private resetPending = true;
@@ -99,8 +104,8 @@ export class OrbitView implements View {
     this.bandFill.renderOrder = 1;
     this.scene.add(this.earth, this.shell, this.plane, this.bandFill);
     this.scene.add(this.flownTrack.object, this.predictedTrack.object, this.conicTrack.object, this.bandInner.object, this.bandOuter.object);
-    this.scene.add(this.siteDot, this.apDot, this.peDot, this.vehicleDot, this.cursorRing);
-    this.labels.add(this.siteLabel, this.apLabel, this.peLabel, this.bandLabel, this.vehicleLabel);
+    this.scene.add(this.siteDot, this.apDot, this.peDot, this.vehicleDot, this.cursorRing, this.vehicleGlow, this.goalRing.object);
+    this.labels.add(this.siteLabel, this.apLabel, this.peLabel, this.bandLabel, this.vehicleLabel, this.goalLabel);
     this.scene.add(this.labels);
   }
 
@@ -123,7 +128,7 @@ export class OrbitView implements View {
   }
 
   private allTracks(): Track[] {
-    return [this.flownTrack, this.predictedTrack, this.conicTrack, this.bandInner, this.bandOuter, ...[...this.ghostTracks.values()].map((g) => g.track)];
+    return [this.flownTrack, this.predictedTrack, this.conicTrack, this.bandInner, this.bandOuter, this.goalRing, ...[...this.ghostTracks.values()].map((g) => g.track)];
   }
 
   resetCamera(): void {
@@ -168,7 +173,8 @@ export class OrbitView implements View {
     const tilt = (52 * Math.PI) / 180;
     const dir = nS.clone().multiplyScalar(Math.cos(tilt)).addScaledVector(mS, Math.sin(tilt)).normalize();
     const halfFov = (this.camera.fov * Math.PI) / 360;
-    const fit = Math.min(Math.tan(halfFov), Math.tan(halfFov) * this.camera.aspect);
+    const { fx, fy } = usableFraction(this.width, this.height, ctx.insets);
+    const fit = Math.min(Math.tan(halfFov) * fy, Math.tan(halfFov) * this.camera.aspect * fx);
     const d = (1.08 * rFit * KM) / fit;
     this.controls.target.set(0, 0, 0);
     this.camera.position.copy(dir).multiplyScalar(d);
@@ -179,6 +185,10 @@ export class OrbitView implements View {
   update(ctx: FrameContext): void {
     const sc = ctx.scenario;
     if (sc !== this.scenario) this.scenario = sc;
+    if (ctx.variant !== this.variant) {
+      this.variant = ctx.variant;
+      this.flownTrack.setHalo(this.variant === 'play');
+    }
     const snap = ctx.snap;
     const ang = snap?.earthAngle ?? 0;
     const st = this.conicState(ctx);
@@ -192,6 +202,8 @@ export class OrbitView implements View {
     this.camera.near = Math.max(1, (camDist - R_EARTH * KM * 1.2) * 0.01);
     this.camera.far = camDist * 10 + 1e5;
     this.camera.updateProjectionMatrix();
+    applyFraming(this.camera, this.width, this.height, ctx.insets);
+    this.overlay.layout(ctx.insets, ctx.variant);
     const ppu = pxPerUnit(this.camera, camDist, this.height);
 
     // Earth rotated by the Earth angle (ECEF -> ECI is rotZ(+angle)).
@@ -233,6 +245,8 @@ export class OrbitView implements View {
       this.vehicleLabel.position.copy(_v);
       setLabelText(this.vehicleLabel, `vehicle ${fmtKm(veh.altitude)}\n${fmtInt(veh.vInertial)} m/s inertial${veh.thrust > 0 ? ' · ENGINE ON' : ''}`);
     }
+    this.vehicleGlow.visible = !!veh && this.variant === 'play';
+    if (this.vehicleGlow.visible) setDot(this.vehicleGlow, _v.copy(this.vehicleLabel.position));
 
     // Time cursor.
     const tc = ctx.source.cursorTime();
@@ -283,6 +297,7 @@ export class OrbitView implements View {
       this.conicTrack.object.visible = false;
       this.apDot.visible = this.peDot.visible = this.apLabel.visible = this.peLabel.visible = false;
       this.plane.visible = this.bandFill.visible = this.bandInner.object.visible = this.bandOuter.object.visible = this.bandLabel.visible = false;
+      this.goalRing.object.visible = this.goalLabel.visible = false;
       return;
     }
     const el = st.el;
@@ -329,6 +344,25 @@ export class OrbitView implements View {
       this.plane.position.set(0, 0, 0);
       this.plane.quaternion.copy(planeQ);
       this.plane.scale.setScalar(rDisc * KM);
+    }
+
+    // Goal altitude ring (orbit-scale goals without a mission band).
+    const goal = ctx.goalAltitude;
+    const showGoal = goal !== null && goal > 150_000 && !ctx.source.orbitBand() && hasPlane;
+    this.goalRing.object.visible = showGoal;
+    this.goalLabel.visible = showGoal && showLabels;
+    if (showGoal && goal !== null) {
+      const rg = R_EARTH + goal;
+      const gkey = `${rg}|${hHat.join(',')}`;
+      const ring = (a: number): Vec3 => [rg * (Math.cos(a) * P[0] + Math.sin(a) * Q[0]), rg * (Math.cos(a) * P[1] + Math.sin(a) * Q[1]), rg * (Math.cos(a) * P[2] + Math.sin(a) * Q[2])];
+      if (gkey !== this.goalKey) {
+        this.goalKey = gkey;
+        const pts: Vec3[] = [];
+        for (let i = 0; i <= 256; i++) pts.push(ring((2 * Math.PI * i) / 256));
+        this.goalRing.setPoints(pts, this.proj);
+      } else this.goalRing.reproject(this.proj);
+      this.proj.toSceneV(ring(Math.PI * 0.25), this.goalLabel.position);
+      setLabelText(this.goalLabel, `GOAL ${fmtKm(goal)}`);
     }
 
     // Mission orbit band in the current plane.

@@ -268,7 +268,7 @@ export class LauncherView implements View {
     const Rc = sc ? sc.geometry.chamberRadius : 50;
     const aspect = this.camera.aspect || 1.6;
     const { fx, fy } = usableFraction(this.width, this.height, this.insets);
-    const dist = Rc * 3.9 * Math.max(1 / fy, 1.25 / (aspect * fx));
+    const dist = Rc * 3.5 * Math.max(1 / fy, 1.3 / (aspect * fx));
     const az = 0.3, el = 0.2;
     this.controls.target.set(0, Rc * 0.02, 0);
     this.camera.position.set(Math.sin(az) * Math.cos(el) * dist, Math.sin(el) * dist + Rc * 0.02, Math.cos(az) * Math.cos(el) * dist);

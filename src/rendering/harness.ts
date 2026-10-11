@@ -14,6 +14,8 @@
  *   ghost  = design id to overlay as a ghost trajectory
  *   fallback=1 forces the Canvas2D fallback; reduced=1 reduced motion;
  *   forces/atmo/pred/labels = 0 to switch overlays off; band=1 mission band.
+ *   variant = engineer | play;  insets = top,bottom,left,right (CSS px);
+ *   goal   = mission goal altitude in metres.
  */
 import { designById } from '../data/designs';
 import { buildScenario } from '../sim/build';
@@ -50,6 +52,11 @@ const overlays: Overlays = {
 };
 const reduced = q.get('reduced') === '1';
 const band = q.get('band') === '1' || designId.startsWith('leo') ? { periapsisMin: 200_000, apoapsisMax: 1_000_000 } : null;
+const variant = q.get('variant') === 'play' ? 'play' : 'engineer';
+const insetVals = (q.get('insets') ?? '0,0,0,0').split(',').map((x) => Number(x) || 0);
+const insets = { top: insetVals[0] ?? 0, bottom: insetVals[1] ?? 0, left: insetVals[2] ?? 0, right: insetVals[3] ?? 0 };
+const goalParam = q.get('goal');
+const goal = goalParam !== null ? Number(goalParam) : null;
 
 function run(id: string): Session {
   const sc = buildScenario(designById(id));
@@ -184,6 +191,9 @@ const source: RenderSource = {
   cursorTime: () => cursorTime,
   reducedMotion: () => reduced,
   orbitBand: () => band,
+  insets: () => insets,
+  variant: () => variant,
+  goalAltitude: () => goal,
 };
 
 const container = document.getElementById('view');

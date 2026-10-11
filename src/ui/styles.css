@@ -377,7 +377,9 @@ button, input, select { font: inherit; color: inherit; }
 .big-l { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: #9fb0c3; }
 .hud-right { position: absolute; right: 16px; top: 120px; z-index: 12; max-width: 260px; padding: 10px 12px; border-radius: 12px; background: var(--glass); border: 1px solid var(--glass-line); display: grid; gap: 4px; font-size: 12.5px; }
 .hud-obj-title { font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hot); }
-.hud-obj { color: #c9d4e1; }
+.hud-obj { color: #c9d4e1; transition: color 0.3s; }
+.hud-obj.done { color: var(--good); font-weight: 700; }
+.hud-obj.miss { color: #9fb0c3; text-decoration: line-through; }
 .hud-controls { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 12; display: flex; gap: 8px; align-items: center; padding: 8px; border-radius: 16px; background: var(--glass); border: 1px solid var(--glass-line); backdrop-filter: blur(8px); flex-wrap: wrap; justify-content: center; max-width: calc(100% - 24px); }
 .hud-rate { font: 700 13px var(--mono); color: var(--hot); min-width: 52px; text-align: center; }
 

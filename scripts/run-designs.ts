@@ -1,3 +1,4 @@
+/** Run every reference design through the solver and print a one-line summary each. Usage: npm run designs [-- id ...] */
 import { DESIGNS } from '../src/data/designs';
 import { buildScenario, ConfigError } from '../src/sim/build';
 import { Session } from '../src/sim/session';

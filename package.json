@@ -14,7 +14,8 @@
     "test:browser": "playwright test",
     "docs:params": "node scripts/gen-parameter-dictionary.mjs",
     "validate": "node scripts/run-ts.mjs scripts/validation-report.ts",
-    "serve:subpath": "node scripts/serve-subpath.mjs 4173 /centrifuge/"
+    "serve:subpath": "node scripts/serve-subpath.mjs 4173 /centrifuge/",
+    "designs": "node scripts/run-ts.mjs scripts/run-designs.ts"
   },
   "dependencies": {
     "react": "19.2.8",
