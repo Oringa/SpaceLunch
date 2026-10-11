@@ -104,8 +104,8 @@ Stars and unlocks change only goals and available parts, never the physics. **En
 
 - **Build** tab: eight primary controls (radius, target speed, elevation, payload mass, shape family, protection, upper stage, flight program), with live consequences under each, plus expandable detail and expert sections. Each control shows its unit, a provenance badge (LAW / REF / APPROX / GAME) and an ⓘ inspector with the formula, sources and assumptions. The preflight list and the live prediction use the same solver.
 - **Flight** tab views:
-  - **Launcher**: cutaway, stroboscopic at high rpm, labelled.
-  - **World**: the launch seen from afar over the curved Earth.
+  - **Launcher**: a 3/4 cutaway in which you see it spin. The time-lapsed spin-up is drawn at a speed the eye can follow, never faster than the real rotor, with motion blur and a tip trail; a caption gives the real rpm. The hold and release show the true rotor phase in slow motion, reached by a continuous hand-off that never turns backwards.
+  - **World**: the launch seen from afar over the curved Earth, with coastlines, country borders, US state lines and a land tint.
   - **Orbit**: the osculating trajectory, apsides and target band.
   - **Map** (`4`): a 2D ground track with the forecast and flown tracks, ghosts, the landing point, range rings and nearby places. Scroll to zoom, drag to pan, double-click to fit.
 

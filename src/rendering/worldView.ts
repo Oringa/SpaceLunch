@@ -23,6 +23,7 @@ import { Track, type RowMapper } from './track';
 import { VehicleMesh } from './vehicleMesh';
 import { BreakupFx } from './effects';
 import { capAnchor, createEarthGeometry, createEarthMaterial, createShellMaterial, createSiteCap, setGraticule } from './earth';
+import { GeoLayer } from './geoLayer';
 import { COLORS, Overlay, fmtFixed, fmtInt, fmtKm, makeLabel, niceStep, setLabelText } from './style';
 import {
   type FrameContext, type Lights, type View, addLights, applyFraming, makeDot, makeGlow, makeRing, setDot, styleLights, usableFraction,
@@ -30,10 +31,10 @@ import {
 
 const KM = 1e-3; // scene units per metre
 const SHELLS: Array<{ alt: number; label: string; short: string; color: string; strength: number }> = [
-  { alt: 11_000, label: '11 km · tropopause', short: '11 km', color: COLORS.shell, strength: 0.05 },
-  { alt: 50_000, label: '50 km · stratopause', short: '50 km', color: COLORS.shell, strength: 0.05 },
-  { alt: 86_000, label: '86 km · mesopause', short: '86 km', color: COLORS.shell, strength: 0.06 },
-  { alt: 100_000, label: '100 km · Kármán line', short: '100 km', color: COLORS.karman, strength: 0.1 },
+  { alt: 11_000, label: '11 km · tropopause', short: '11 km', color: COLORS.shell, strength: 0.03 },
+  { alt: 50_000, label: '50 km · stratopause', short: '50 km', color: COLORS.shell, strength: 0.03 },
+  { alt: 86_000, label: '86 km · mesopause', short: '86 km', color: COLORS.shell, strength: 0.035 },
+  { alt: 100_000, label: '100 km · Kármán line', short: '100 km', color: COLORS.karman, strength: 0.07 },
 ];
 const GOAL_COLOR = '#ffd166';
 const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
@@ -77,7 +78,7 @@ export class WorldView implements View {
   private apoCache: { table: TelemetryTable | null; len: number; row: number } = { table: null, len: 0, row: -1 };
   private vehicle: VehicleMesh | null = null;
   private readonly vehicleHolder = new THREE.Group();
-  private readonly vehicleDot = makeRing(COLORS.flown, 22);
+  private readonly vehicleDot = makeRing(COLORS.flown, 26);
   private readonly vehicleLabel = makeLabel('', 'amber', [-0.08, 1.15]);
   private readonly cursorRing = makeRing('#ffffff', 16);
   private scenario: Scenario | null = null;
@@ -95,7 +96,9 @@ export class WorldView implements View {
   private readonly lights: Lights;
   private variant: 'engineer' | 'play' = 'engineer';
   private compact = false;
-  private readonly vehicleGlow = makeGlow(COLORS.flown, 54);
+  private readonly vehicleGlow = makeGlow(COLORS.flown, 44);
+  /** Coastlines, borders and land tint (loaded lazily). */
+  private readonly geo: GeoLayer;
   private readonly goalShell: THREE.Mesh;
   private readonly goalArc = new Track({ color: GOAL_COLOR, width: 2.4, opacity: 0.95, renderOrder: 7 });
   private readonly goalLabel = makeLabel('', 'release', [-0.06, 0.5]);
@@ -126,15 +129,18 @@ export class WorldView implements View {
 
     this.earth = new THREE.Mesh(createEarthGeometry(R_EARTH - 150), this.earthMat);
     this.scene.add(this.earth);
+    this.geo = new GeoLayer([this.earthMat]);
+    this.scene.add(this.geo.group);
     for (const s of SHELLS) {
       const m = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH + s.alt, 192, 96), createShellMaterial(s.color, s.strength));
       m.renderOrder = 2;
       this.shells.push(m);
       this.atmo.add(m);
-      const arc = new Track({ color: s.alt === 100_000 ? '#a9c4ff' : '#7fa3dc', width: s.alt === 100_000 ? 1.8 : 1.3, opacity: s.alt === 100_000 ? 0.95 : 0.8, renderOrder: 3 });
+      const karman = s.alt === 100_000;
+      const arc = new Track({ color: karman ? '#a9c4ff' : '#7fa3dc', width: karman ? 1.5 : 1, opacity: karman ? 0.7 : 0.4, renderOrder: 3 });
       this.arcs.push(arc);
       this.atmo.add(arc.object);
-      const l = makeLabel(s.label, 'blue', [1.04, 0.5]);
+      const l = makeLabel(s.label, karman ? 'blue' : 'muted', [1.04, 0.5]);
       this.arcLabels.push(l);
       this.atmo.add(l);
     }
@@ -189,6 +195,7 @@ export class WorldView implements View {
     }
     this.cap = new THREE.Mesh(createSiteCap(this.siteUp, g.siteAltitude), this.earthMat);
     this.scene.add(this.cap);
+    this.geo.setSite(this.siteUp, g.siteAltitude);
     const latDeg = (g.lat * 180) / Math.PI, lonDeg = (g.lon * 180) / Math.PI;
     this.siteText = {
       full: `LAUNCH SITE\n${fmtFixed(Math.abs(latDeg), 2)}°${latDeg >= 0 ? 'N' : 'S'} ${fmtFixed(Math.abs(lonDeg), 2)}°${lonDeg >= 0 ? 'E' : 'W'} · ${fmtInt(g.siteAltitude)} m`,
@@ -307,6 +314,7 @@ export class WorldView implements View {
       styleLights(this.lights, this.variant);
       this.flownTrack.setHalo(this.variant === 'play');
       this.goalArc.setHalo(this.variant === 'play', 9, 0.18);
+      (this.vehicleGlow.material as THREE.PointsMaterial).size = this.variant === 'play' ? 58 : 44;
     }
     const compact = ctx.variant === 'play' || ctx.width < 640;
     if (compact !== this.compact) {
@@ -343,6 +351,8 @@ export class WorldView implements View {
     const camFrame = this.cameraFrame();
     const camAlt = norm(camFrame) - R_EARTH;
     setGraticule(this.earthMat, Math.max(camAlt, camDist / KM));
+    this.proj.place(this.geo.group, [0, 0, 0]);
+    this.geo.update(camAlt, KM);
 
     // Site + facility.
     this.proj.toSceneV(this.siteGround, _v);
@@ -391,7 +401,7 @@ export class WorldView implements View {
       this.breakup.scaleToPixels(this.camera, this.height, 1.3);
     }
     this.updateVehicle(snap, vehEcef, rotating, ppu, ctx.overlays.labels);
-    this.vehicleGlow.visible = this.variant === 'play' && this.vehicleHolder.visible;
+    this.vehicleGlow.visible = this.vehicleHolder.visible;
     if (this.vehicleGlow.visible) setDot(this.vehicleGlow, this.vehicleHolder.position);
     this.declutter(ppu, !!veh);
 
@@ -678,6 +688,7 @@ export class WorldView implements View {
     this.breakup.dispose();
     for (const t of this.allTracks()) t.dispose();
     if (this.cap) this.cap.geometry.dispose();
+    this.geo.dispose();
     disposeTree(this.scene);
     this.earthMat.dispose();
     this.overlay.dispose();

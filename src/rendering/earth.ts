@@ -1,9 +1,11 @@
 /**
- * Procedural Earth (no textures): dark-blue sphere with an analytic
- * latitude/longitude graticule computed per fragment, so lines stay crisp at
- * every zoom level, plus a finely tessellated spherical cap around the launch
- * site (a coarse sphere's facets sag by ~100 m, which would bury or float the
- * site at range scale) and translucent fresnel shells for atmosphere layers.
+ * Procedural Earth: dark-blue sphere with an analytic latitude/longitude
+ * graticule computed per fragment, so lines stay crisp at every zoom level,
+ * an optional land tint (an equirectangular land mask rasterised from the
+ * embedded map, see geoLayer.ts), plus a finely tessellated spherical cap
+ * around the launch site (a coarse sphere's facets sag by ~100 m, which would
+ * bury or float the site at range scale) and translucent fresnel shells for
+ * atmosphere layers.
  *
  * Mesh-local coordinates are ECEF metres; the views place meshes with their
  * Projection (camera-relative, double-precision placement).
@@ -40,6 +42,10 @@ uniform vec3 uMinorColor;
 uniform vec3 uMajorColor;
 uniform vec3 uRim;
 uniform vec3 uLight;
+uniform sampler2D uLand;
+uniform float uLandMix;
+uniform float uGrid;
+uniform vec3 uLandColor;
 varying vec3 vDir;
 varying vec3 vNormalV;
 varying vec3 vViewPos;
@@ -68,9 +74,16 @@ void main() {
   vec3 n = normalize(vNormalV);
   vec3 v = normalize(-vViewPos);
   float ndl = max(dot(n, normalize(uLight)), 0.0);
-  vec3 col = uBase * (0.6 + 0.6 * ndl);
-  col = mix(col, uMinorColor, minorM * 0.45);
-  col = mix(col, uMajorColor, max(majorM, eq) * 0.7);
+  vec3 base = uBase;
+  if (uLandMix > 0.0) {
+    // Equirectangular land mask, bilinear without mipmaps (no seam at +-180, cheap in software GL);
+    // the coastline lines drawn on top hide its soft edge.
+    float land = texture2D(uLand, vec2(lon / 360.0 + 0.5, lat / 180.0 + 0.5)).r;
+    base = mix(uBase, uLandColor, land * uLandMix);
+  }
+  vec3 col = base * (0.6 + 0.6 * ndl);
+  col = mix(col, uMinorColor, minorM * 0.45 * uGrid);
+  col = mix(col, uMajorColor, max(majorM, eq) * 0.7 * uGrid);
   float rim = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 4.0);
   col += uRim * rim * uRimStrength;
   gl_FragColor = vec4(col, 1.0);
@@ -123,8 +136,24 @@ export function createEarthMaterial(rimStrength = 0.35): THREE.ShaderMaterial {
       uMajorColor: { value: new THREE.Color('#3f7099') },
       uRim: { value: new THREE.Color('#3d7fc4') },
       uLight: { value: new THREE.Vector3(-0.35, 0.55, 0.75) },
+      uLand: { value: null },
+      uLandMix: { value: 0 },
+      uGrid: { value: 1 },
+      uLandColor: { value: new THREE.Color('#2f3d3a') },
     },
   });
+}
+
+/**
+ * Land tint on an Earth material (null removes it). With land drawn the
+ * ocean is a little darker and the graticule recedes, so coastlines and
+ * borders carry the geography.
+ */
+export function setEarthLand(mat: THREE.ShaderMaterial, land: THREE.Texture | null, mix = 0.85): void {
+  mat.uniforms.uLand.value = land;
+  mat.uniforms.uLandMix.value = land ? mix : 0;
+  mat.uniforms.uGrid.value = land ? 0.2 : 1;
+  (mat.uniforms.uBase.value as THREE.Color).set(land ? '#0a1c30' : '#0c233b');
 }
 
 /**
@@ -170,7 +199,10 @@ function addDirAttribute(g: THREE.BufferGeometry): void {
  * smoothly to `plateauAlt` near the centre (the site's elevation above the
  * spherical datum) and returns to the datum at the rim.
  */
-export function createSiteCap(centerDir: Vec3, plateauAlt: number, capRadius = 400_000, rings = 72, segs = 120): THREE.BufferGeometry {
+/** Radius (m, along the surface) of the site cap; its plateau eases back to the datum by the rim. */
+export const CAP_RADIUS = 400_000;
+
+export function createSiteCap(centerDir: Vec3, plateauAlt: number, capRadius = CAP_RADIUS, rings = 72, segs = 120): THREE.BufferGeometry {
   const up = normalize(centerDir);
   const ref: Vec3 = Math.abs(up[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
   const e1 = normalize(cross(ref, up));

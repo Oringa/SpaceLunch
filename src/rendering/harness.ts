@@ -23,6 +23,8 @@
  *            display time, to preview any kind's effect on any design/phase.
  *   failafter = ms of wall time before the failure appears (with t=fail or fakefail),
  *            so screenshots can catch the first moments of the effect.
+ *   clock  = ready: start the play clock (and failafter) when the harness reports ready
+ *            instead of at page load, so timed screenshot sequences start at `t`.
  */
 import { designById } from '../data/designs';
 import { FAILURE_CASES } from '../data/failures';
@@ -81,7 +83,6 @@ const session = run(failCase ?? designId);
 const sum = session.summary();
 const tRelease = session.releaseRecord?.t ?? sum.times.end;
 const tSpinStart = sum.times.pumpdown;
-const tSpinEnd = sum.times.pumpdown + sum.times.spinup;
 state.info.runMs = Math.round(performance.now() - t0);
 state.info.terminal = sum.terminal;
 state.info.tRelease = tRelease;
@@ -124,13 +125,9 @@ switch (tParam) {
 const cursorParam = q.get('cursor');
 const cursorTime = cursorParam !== null ? tRelease + Number(cursorParam) : null;
 
+/** Displayed phase (the session's own, so runs that fail mid spin-up stay in 'spinup'). */
 function phaseAt(t: number): Phase {
-  if (t < tSpinStart) return 'pumpdown';
-  if (t < tSpinEnd) return 'spinup';
-  if (t < tRelease) return 'hold';
-  if (t < tRelease + sum.times.corridor) return 'corridor';
-  if (t < sum.times.end) return 'flight';
-  return 'ended';
+  return session.phaseAt(t);
 }
 
 /** Replay snapshot with the display-time phase and (pre-release) rotor state from telemetry. */
@@ -183,8 +180,9 @@ function growFlown(t: number | null): void {
 }
 growFlown(tDisplay);
 
-const wallStart = performance.now();
+let wallStart = performance.now();
 state.info.wallStart = wallStart;
+const clockAtReady = q.get('clock') === 'ready';
 const failAfter = Number(q.get('failafter') ?? 0);
 function failHeld(): boolean {
   return failAfter > 0 && performance.now() - wallStart < failAfter;
@@ -192,7 +190,7 @@ function failHeld(): boolean {
 function currentT(): number | null {
   if (tDisplay === null) return null;
   if (tParam === 'fail' && failHeld()) return tDisplay - 1e-3;
-  if (!play) return tDisplay;
+  if (!play || (clockAtReady && !state.ready)) return tDisplay;
   return Math.min(sum.times.end, tDisplay + ((performance.now() - wallStart) / 1000) * play);
 }
 
@@ -252,6 +250,10 @@ state.info.alt = snap0?.vehicle?.altitude;
 let frames = 0;
 const tick = (): void => {
   if (++frames >= 12) {
+    if (clockAtReady) {
+      wallStart = performance.now();
+      state.info.wallStart = wallStart;
+    }
     state.ready = true;
     return;
   }

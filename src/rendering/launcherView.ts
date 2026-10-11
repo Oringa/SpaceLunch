@@ -5,14 +5,20 @@
  * left-to-right from the default camera on the +Z side).
  *
  * Rotor phase: the vehicle sits at R (cos phi h - sin phi u), i.e. the rotor
- * group is rotated by -phi about scene Z. Above ~2 rad/s the true phase
- * cannot be shown honestly at display frame rates, so the rotor is drawn at a
- * clearly labelled stroboscopic angle with a translucent swept disc; true
- * phase returns during hold, the exit corridor and just after release.
+ * group is rotated by -phi about scene Z. During the time-lapsed pump-down
+ * and spin-up the true phase per frame is meaningless (aliasing), so the arm
+ * turns at a perceptual display rate that grows with the true rate and
+ * saturates at ~2.5 rev/s (see spin.ts), with speed cues that grow with the
+ * true speed (fading ghost copies of the arm, a swept disc, a bright trail
+ * behind the vehicle) and an honest caption. The true phase is drawn during
+ * hold, the exit corridor and just after release, blended in continuously.
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import type { Scenario } from '../sim/build';
 import { fmtPa } from '../sim/labels';
 import type { Snapshot } from '../sim/session';
@@ -23,13 +29,50 @@ import { type Vec3, cross, rotZ, sub } from '../physics/vec3';
 import { Projection, disposeTree, eciRowsToEcef, hasTrajectory, pxPerUnit } from './projection';
 import { Track } from './track';
 import { VehicleMesh } from './vehicleMesh';
-import { BurstFx, type Collider, FailureClock, dustPuff, failureSeed, flightBurst, isQuietFailure } from './effects';
+import { BurstFx, type Collider, FailureClock, dustPuff, failureSeed, flightBurst, isMachineFailure, isQuietFailure } from './effects';
+import { SpinDisplay, speedCue } from './spin';
 import { COLORS, Overlay, fmtFixed, fmtInt, fmtKm, fmtLen, makeLabel, setLabelText, niceStep } from './style';
 import {
   type FrameContext, type Insets, type Lights, type View, MAIN_ONLY_LAYER, NO_INSETS, addLights, applyFraming, makeGlow, makeRing, setDot, styleLights, usableFraction,
 } from './viewBase';
 
-const STROBE_OMEGA = 2; // rad/s
+/** Drawn spin (rad/s) above which labels riding on the rotor are hidden (unreadable while turning). */
+const LABEL_SPIN_MAX = 0.8;
+/** Drawn spin (rad/s) above which the force arrows' labels are hidden. */
+const ARROW_SPIN_MAX = 3;
+/** Fading ghost copies of the arm (motion smear). */
+const GHOSTS = 4;
+/** Room kept free at the top of the launcher view for the banner (CSS px). */
+const TOP_ROOM = 44;
+/** Tip trail resolution (segments). */
+const TRAIL_SEGS = 72;
+
+/** Machine palette: a warm, bright rotor against a cool, mid-grey chamber and a dark sky. */
+const PAL = {
+  sky: '#0a0f16',
+  skyHorizon: '#1a2533',
+  ground: '#121820',
+  grid: '#1f2a37',
+  backWall: '#283341',
+  backRings: '#34455a',
+  rimInner: '#66768c',
+  cut: '#8a99ae',
+  edge: '#c6d2e0',
+  edgeBack: '#6f8299',
+  concrete: '#3a424d',
+  hub: '#b9c3cf',
+  arm: '#ecd8b4',
+  armEmissive: '#3a2810',
+  accent: '#ff8a3d',
+  counterweight: '#d4893f',
+  cradle: '#93a5bb',
+  smear: '#ffd9a8',
+  trail: '#ffd48f',
+  disc: '#a9bdd4',
+  tunnelInner: '#3d4b60',
+  tunnelOuter: '#93a3b8',
+} as const;
+
 const PHASE_NAME: Record<string, string> = {
   pumpdown: 'PUMP-DOWN', spinup: 'SPIN-UP', hold: 'HOLD (phase lock)', corridor: 'RELEASE · EXIT CORRIDOR', flight: 'FLIGHT', ended: 'ENDED',
 };
@@ -81,6 +124,8 @@ interface LauncherFailure {
   phaseStart: number;
   /** Display gravity (m/s^2) for debris in the chamber. */
   gD: number;
+  /** The machine is not involved (e.g. a failure in flight): the rotor keeps coasting as before. */
+  rotorFree: boolean;
 }
 
 /** Solid arrow (shaft + head) of unit design, re-posed every frame. */
@@ -210,6 +255,72 @@ function lineLoop(r: number, z: number, color: THREE.ColorRepresentation, opacit
 /** Identity projection for scene-space helper lines (launcher scene is metres at the hub). */
 const IDENTITY = new Projection();
 
+/** Screen-space fat line (pixel width) through segment pairs [x0,y0,z0, x1,y1,z1, ...]. */
+function fatLines(segs: number[], mat: LineMaterial): LineSegments2 {
+  const g = new LineSegmentsGeometry();
+  g.setPositions(segs);
+  const l = new LineSegments2(g, mat);
+  l.frustumCulled = false;
+  l.layers.set(MAIN_ONLY_LAYER);
+  return l;
+}
+
+/** Straight segment along an arm part's front face (rotor coords; sign -1 for the counter arm). */
+function armFaceSeg(st: Array<{ x: number; w: number; h: number }>, sign: number, lift: number): number[] {
+  let hMax = 0;
+  for (const p of st) hMax = Math.max(hMax, p.h);
+  const z = hMax / 2 + lift;
+  return [sign * st[0].x, 0, z, sign * st[st.length - 1].x, 0, z];
+}
+
+/**
+ * Annular strip in the rotor plane that starts at the drawn rotor angle and
+ * extends backwards (against the spin), its alpha fading along the strip:
+ * used for the tip trail and the motion smear of the arms. Positions are
+ * rewritten every frame (a few hundred vertices).
+ */
+class ArcStrip {
+  readonly mesh: THREE.Mesh;
+  readonly material: THREE.MeshBasicMaterial;
+  private readonly n: number;
+  constructor(color: string, segs: number, falloff: number, additive: boolean, renderOrder: number) {
+    this.n = segs;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array((segs + 1) * 2 * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    const col = new Float32Array((segs + 1) * 2 * 4);
+    const c = new THREE.Color(color);
+    for (let k = 0; k <= segs; k++) {
+      const a = Math.pow(1 - k / segs, falloff);
+      for (let e = 0; e < 2; e++) col.set([c.r, c.g, c.b, a], (2 * k + e) * 4);
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 4));
+    const idx: number[] = [];
+    for (let k = 0; k < segs; k++) idx.push(2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 1, 2 * k + 3, 2 * k + 2);
+    g.setIndex(idx);
+    this.material = new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
+      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    });
+    this.mesh = new THREE.Mesh(g, this.material);
+    this.mesh.frustumCulled = false;
+    this.mesh.layers.set(MAIN_ONLY_LAYER);
+    this.mesh.renderOrder = renderOrder;
+    this.mesh.visible = false;
+  }
+
+  /** Strip between radii r0..r1 (sign -1: the opposite arm) from rotor angle phi back over len (rad). */
+  set(phi: number, len: number, r0: number, r1: number, z: number, sign = 1): void {
+    const pos = this.mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+    for (let j = 0; j <= this.n; j++) {
+      const a = -(phi - (len * j) / this.n);
+      const c = sign * Math.cos(a), sn = sign * Math.sin(a);
+      pos.setXYZ(2 * j, r0 * c, r0 * sn, z);
+      pos.setXYZ(2 * j + 1, r1 * c, r1 * sn, z);
+    }
+    pos.needsUpdate = true;
+  }
+}
+
 export class LauncherView implements View {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
@@ -224,21 +335,35 @@ export class LauncherView implements View {
   private vehicleOnArm = new THREE.Group();
   private counterBlock: THREE.Object3D | null = null;
   private cwLabel: CSS2DObject | null = null;
+  private armLabel: CSS2DObject | null = null;
+  /** Swept disc (speed cue; not part of the rotating group). */
   private blurDisc = new THREE.Group();
+  private discMat: THREE.MeshBasicMaterial | null = null;
+  /** Perceptual display spin / true-phase handoff. */
+  private readonly spin = new SpinDisplay();
+  /** Fat-line materials of the current machine (resolution follows the viewport). */
+  private lineMats: LineMaterial[] = [];
+  /** Motion smear: fading copies of the arm and counterweight trailing the drawn arm. */
+  private ghosts: Array<{ group: THREE.Group; line: LineMaterial; mesh: THREE.MeshBasicMaterial }> = [];
+  /** Bright trail behind the vehicle at the tip, and the smooth smear wedges of both arms. */
+  private trail: ArcStrip | null = null;
+  private smearV: ArcStrip | null = null;
+  private smearC: ArcStrip | null = null;
+  private smearR = { hub: 0.5, v: 1, c: 1, z: 0 };
   private readonly labels = new THREE.Group();
   private readonly flownTrack = new Track({ color: COLORS.flown, width: 2.5, renderOrder: 5 });
   private readonly predictedTrack = new Track({ color: COLORS.predicted, width: 1.8, dashed: true, opacity: 0.9, renderOrder: 4 });
-  private readonly pathCircle = new Track({ color: '#6e7681', width: 1, dashed: true, opacity: 0.8 });
+  private readonly pathCircle = new Track({ color: '#8b97a8', width: 1, dashed: true, opacity: 0.55 });
   private readonly releaseArc = new Track({ color: COLORS.release, width: 5, renderOrder: 6 });
   private readonly corridorLine = new Track({ color: COLORS.release, width: 1.5, dashed: true, opacity: 0.9 });
-  private readonly tunnelWallA = new Track({ color: '#9aa7b8', width: 1.6 });
-  private readonly tunnelWallB = new Track({ color: '#9aa7b8', width: 1.6 });
+  private readonly tunnelWallA = new Track({ color: PAL.edge, width: 1.8 });
+  private readonly tunnelWallB = new Track({ color: PAL.edge, width: 1.8 });
   private readonly vArrow = new Arrow(COLORS.velocity);
   private readonly aArrow = new Arrow(COLORS.accel);
   private readonly vLabel = makeLabel('', 'green', [0, 0.5]);
   private readonly aLabel = makeLabel('', 'violet', [0, 0.5]);
   private readonly vehicleLabel = makeLabel('VEHICLE', 'default', [0, 1.2]);
-  private readonly vehicleRing = makeRing(COLORS.flown, 30);
+  private readonly vehicleRing = makeRing(COLORS.flown, 32);
   private readonly awayLabel = makeLabel('', 'amber', [0.5, 1.2]);
   private readonly fixedLabels: CSS2DObject[] = [];
   private ground = new THREE.Group();
@@ -253,7 +378,7 @@ export class LauncherView implements View {
   private insets: Insets = NO_INSETS;
   /** Fixed label texts: full (engineer) and short ('play'; null hides it). */
   private readonly labelTexts = new Map<CSS2DObject, { full: string; short: string | null }>();
-  private readonly vehicleGlow = makeGlow(COLORS.flown, 46);
+  private readonly vehicleGlow = makeGlow(COLORS.flown, 42);
   private width = 1;
   private readonly insetCam = new THREE.PerspectiveCamera(30, 1.5, 0.01, 1e5);
   private readonly insetDiv: HTMLDivElement;
@@ -303,8 +428,10 @@ export class LauncherView implements View {
   };
 
   constructor(dom: HTMLElement, overlayParent: HTMLElement) {
-    this.scene.background = new THREE.Color(COLORS.background);
-    this.scene.fog = new THREE.Fog(COLORS.background, 200, 800);
+    // Solid sky (a full-screen gradient costs ~25 % of the frame in software GL); the fogged
+    // ground fades to a lighter horizon band, which gives the depth cue.
+    this.scene.background = new THREE.Color(PAL.sky);
+    this.scene.fog = new THREE.Fog(PAL.skyHorizon, 200, 800);
     this.camera = new THREE.PerspectiveCamera(40, 1, 0.05, 2e6);
     this.controls = new OrbitControls(this.camera, dom);
     this.controls.enabled = false;
@@ -348,6 +475,7 @@ export class LauncherView implements View {
     this.camera.aspect = w / Math.max(h, 1);
     this.camera.updateProjectionMatrix();
     for (const t of [this.flownTrack, this.predictedTrack, this.pathCircle, this.releaseArc, this.corridorLine, this.tunnelWallA, this.tunnelWallB]) t.setResolution(w, h);
+    for (const m of this.lineMats) m.resolution.set(w, h);
     this.fx.setResolution(w, h);
   }
 
@@ -390,15 +518,39 @@ export class LauncherView implements View {
     if (this.insetCaption.textContent !== cap) this.insetCaption.textContent = cap;
   }
 
+  /**
+   * Default framing: a 3/4 elevated view through the cut-away front wall that
+   * shows the whole rotor disc (it reads as a slightly tilted ellipse, so the
+   * spin is obvious) together with the exit tunnel, fitted to the region left
+   * free by UI insets.
+   */
   private applyCameraReset(): void {
     const sc = this.scenario;
     const Rc = sc ? sc.geometry.chamberRadius : 50;
+    let cx = 0, cy = 0, halfW = Rc * 1.05, halfH = Rc * 1.05;
+    if (sc) {
+      const g = sc.geometry;
+      const O = this.proj.toSceneV(g.tunnelOrigin, _v3);
+      const dir = this.proj.dirToScene(g.tunnelDir, _v4).normalize();
+      const ex = O.x + dir.x * g.sEnd, ey = O.y + dir.y * g.sEnd;
+      const yLow = Math.max(-g.hubHeight, -Rc * 1.15);
+      const x0 = Math.min(-Rc, ex), x1 = Math.max(Rc, ex), y0 = Math.min(yLow, ey), y1 = Math.max(Rc, ey);
+      cx = (x0 + x1) / 2;
+      cy = (y0 + y1) / 2;
+      halfW = (x1 - x0) / 2 + Rc * 0.04;
+      halfH = (y1 - y0) / 2 + Rc * 0.04;
+    }
     const aspect = this.camera.aspect || 1.6;
-    const { fx, fy } = usableFraction(this.width, this.height, this.insets);
-    const dist = Rc * 3.5 * Math.max(1 / fy, 1.3 / (aspect * fx));
-    const az = 0.3, el = 0.2;
-    this.controls.target.set(0, Rc * 0.02, 0);
-    this.camera.position.set(Math.sin(az) * Math.cos(el) * dist, Math.sin(el) * dist + Rc * 0.02, Math.cos(az) * Math.cos(el) * dist);
+    const { fx, fy: fy0 } = usableFraction(this.width, this.height, this.insets);
+    const fy = Math.max(0.25, fy0 - TOP_ROOM / Math.max(this.height, 1));
+    const az = 0.45, el = 0.28;
+    const tanH = Math.tan((this.camera.fov * Math.PI) / 360);
+    // Foreshortening of the rotor plane seen from (az, el) shrinks the box a little.
+    const fitW = (halfW * Math.cos(az) + Rc * 0.35 * Math.sin(az)) / (tanH * aspect * fx);
+    const fitH = (halfH * Math.cos(el) + Rc * 0.3 * Math.sin(el)) / (tanH * fy);
+    const dist = Math.max(fitW, fitH) * 1.02;
+    this.controls.target.set(cx, cy, 0);
+    this.camera.position.set(cx + Math.sin(az) * Math.cos(el) * dist, cy + Math.sin(el) * dist, Math.cos(az) * Math.cos(el) * dist);
     this.camera.lookAt(this.controls.target);
     this.controls.minDistance = 1;
     this.controls.maxDistance = Rc * 40;
@@ -443,31 +595,31 @@ export class LauncherView implements View {
     const wallT = Math.min(1.2, Math.max(0.25, 0.012 * Rc));
     const hubR = Math.min(2.5, Math.max(0.35, 0.035 * Rc));
 
-    const steel = new THREE.MeshStandardMaterial({ color: '#4a586c', emissive: '#121a24', metalness: 0.45, roughness: 0.6, side: THREE.BackSide });
-    const backWallMat = new THREE.MeshStandardMaterial({ color: '#141b25', metalness: 0.3, roughness: 0.85, side: THREE.DoubleSide });
-    const cutMat = new THREE.MeshStandardMaterial({ color: '#4a5668', metalness: 0.2, roughness: 0.7, side: THREE.DoubleSide });
-    const shellMat = new THREE.MeshStandardMaterial({ color: '#58667a', metalness: 0.4, roughness: 0.6, transparent: true, opacity: 0.12, depthWrite: false });
-    const hubMat = new THREE.MeshStandardMaterial({ color: '#8b949e', metalness: 0.7, roughness: 0.35 });
-    const armMat = new THREE.MeshStandardMaterial({ color: '#6b7787', metalness: 0.45, roughness: 0.45 });
-    const cwMat = new THREE.MeshStandardMaterial({ color: '#9e6a3a', metalness: 0.6, roughness: 0.4 });
-    const concrete = new THREE.MeshStandardMaterial({ color: '#2a2f36', metalness: 0.05, roughness: 0.95 });
+    const steel = new THREE.MeshStandardMaterial({ color: PAL.rimInner, emissive: '#18212c', metalness: 0.4, roughness: 0.6, side: THREE.BackSide });
+    const backWallMat = new THREE.MeshStandardMaterial({ color: PAL.backWall, metalness: 0.2, roughness: 0.85, side: THREE.DoubleSide });
+    const cutMat = new THREE.MeshStandardMaterial({ color: PAL.cut, metalness: 0.2, roughness: 0.65, side: THREE.DoubleSide });
+    const shellMat = new THREE.MeshStandardMaterial({ color: '#7d8da3', metalness: 0.4, roughness: 0.6, transparent: true, opacity: 0.14, depthWrite: false });
+    const hubMat = new THREE.MeshStandardMaterial({ color: PAL.hub, metalness: 0.6, roughness: 0.35 });
+    const armMat = new THREE.MeshStandardMaterial({ color: PAL.arm, emissive: PAL.armEmissive, metalness: 0.3, roughness: 0.42 });
+    const cwMat = new THREE.MeshStandardMaterial({ color: PAL.counterweight, emissive: '#2a1606', metalness: 0.45, roughness: 0.4 });
+    const concrete = new THREE.MeshStandardMaterial({ color: PAL.concrete, metalness: 0.05, roughness: 0.95 });
 
     // Chamber: back wall, inner rim (visible inner wall), cut section at the front edge, faint outer skin.
     const back = new THREE.Mesh(new THREE.CircleGeometry(Rc, 160), backWallMat);
     back.position.z = -D / 2;
     this.machine.add(back);
-    for (const f of [0.25, 0.5, 0.75]) {
-      const ring = lineLoop(Rc * f, -D / 2 + 0.02, '#223042');
+    for (const f of [0.5]) {
+      const ring = lineLoop(Rc * f, -D / 2 + 0.02, PAL.backRings, 0.7);
       this.machine.add(ring);
     }
     const spokes: number[] = [];
-    for (let i = 0; i < 24; i++) {
-      const a = (2 * Math.PI * i) / 24;
+    for (let i = 0; i < 12; i++) {
+      const a = (2 * Math.PI * i) / 12;
       spokes.push(hubR * 1.6 * Math.cos(a), hubR * 1.6 * Math.sin(a), -D / 2 + 0.02, Rc * Math.cos(a), Rc * Math.sin(a), -D / 2 + 0.02);
     }
     const spokeGeo = new THREE.BufferGeometry();
     spokeGeo.setAttribute('position', new THREE.Float32BufferAttribute(spokes, 3));
-    this.machine.add(new THREE.LineSegments(spokeGeo, new THREE.LineBasicMaterial({ color: '#1d2836' })));
+    this.machine.add(new THREE.LineSegments(spokeGeo, new THREE.LineBasicMaterial({ color: PAL.backRings, transparent: true, opacity: 0.45 })));
     const rimGeo = new THREE.CylinderGeometry(Rc, Rc, D, 192, 1, true);
     rimGeo.rotateX(Math.PI / 2);
     this.machine.add(new THREE.Mesh(rimGeo, steel));
@@ -480,8 +632,8 @@ export class LauncherView implements View {
     const backCut = new THREE.Mesh(new THREE.RingGeometry(Rc, Rc + wallT, 192), cutMat);
     backCut.position.z = -D / 2;
     this.machine.add(backCut);
-    this.machine.add(lineLoop(Rc, D / 2 + 0.01, '#9aa7b8', 0.9), lineLoop(Rc + wallT, D / 2 + 0.01, '#9aa7b8', 0.9));
-    this.machine.add(lineLoop(Rc, -D / 2 + 0.03, '#56657a', 0.9));
+    this.machine.add(lineLoop(Rc, D / 2 + 0.01, PAL.edge, 0.95), lineLoop(Rc + wallT, D / 2 + 0.01, PAL.edge, 0.95));
+    this.machine.add(lineLoop(Rc, -D / 2 + 0.03, PAL.edgeBack, 0.9));
 
     // Hub, shaft and bearing housing on the back wall.
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(hubR, hubR, D * 0.55, 40), hubMat);
@@ -520,25 +672,52 @@ export class LauncherView implements View {
     const span = Math.max(xB - xA, 1e-3);
     const xBreak = Math.min(xA + 0.7 * span, Math.max(xA + 0.25 * span, sc.derived.stressMaxAt));
     const nIn = Math.max(3, Math.round((14 * (xBreak - xA)) / span));
-    const armV = new THREE.Mesh(taperedBar(armStations(vArm, xA, xBreak, minW, minH, nIn)), armMat);
+    const stIn = armStations(vArm, xA, xBreak, minW, minH, nIn);
+    const stOut = armStations(vArm, xBreak, xB, minW, minH, Math.max(3, 14 - nIn));
+    const armV = new THREE.Mesh(taperedBar(stIn), armMat);
     this.rotor.add(armV);
-    const armVOuter = new THREE.Mesh(taperedBar(armStations(vArm, xBreak, xB, minW, minH, Math.max(3, 14 - nIn))), armMat);
+    const armVOuter = new THREE.Mesh(taperedBar(stOut), armMat);
     this.outerPiece.add(armVOuter);
     this.rotor.add(this.outerPiece);
     this.dims = { Rc, D, hubR, xBreak, xArmEnd: xB, cradle, minW };
     const Rcw = sc.rotor.counterRadius;
     const cwSize = Math.max(Math.cbrt(sc.derived.counterMass / 7850), 0.03 * R);
-    const armC = new THREE.Mesh(taperedBar(armStations(cArm, hubR * 0.9, Math.max(hubR * 1.2, Rcw - cwSize / 2), minW, minH)), armMat);
+    const stC = armStations(cArm, hubR * 0.9, Math.max(hubR * 1.2, Rcw - cwSize / 2), minW, minH);
+    const armC = new THREE.Mesh(taperedBar(stC), armMat);
     armC.rotation.z = Math.PI;
     this.rotor.add(armC);
-    const cw = new THREE.Mesh(new THREE.BoxGeometry(cwSize, cwSize * 1.4, cwSize), cwMat);
+    const cwGeo = new THREE.BoxGeometry(cwSize, cwSize * 1.4, cwSize);
+    const cw = new THREE.Mesh(cwGeo, cwMat);
     cw.position.x = -Rcw;
     this.rotor.add(cw);
     this.counterBlock = cw;
-    const mount = new THREE.Mesh(new THREE.BoxGeometry(cradle, Math.max(v.length * 0.45, 0.5), Math.max(minH * 1.6, v.diameter * 1.3)), cwMat.clone());
-    (mount.material as THREE.MeshStandardMaterial).color.set('#5c6b7e');
+    const mount = new THREE.Mesh(
+      new THREE.BoxGeometry(cradle, Math.max(v.length * 0.45, 0.5), Math.max(minH * 1.6, v.diameter * 1.3)),
+      new THREE.MeshStandardMaterial({ color: PAL.cradle, metalness: 0.5, roughness: 0.4 }),
+    );
     mount.position.x = R - v.diameter / 2 - cradle / 2;
     this.outerPiece.add(mount);
+
+    // Accent stripe along the arms' front faces (main camera only; the true-scale inset stays plain):
+    // a dark outline under a bright line, so the arm reads at a glance whatever its true section.
+    this.lineMats = [];
+    const lineMat = (color: string, width: number, opacity = 1): LineMaterial => {
+      const m = new LineMaterial({ color: new THREE.Color(color).getHex(), linewidth: width, worldUnits: false, transparent: opacity < 1, opacity, depthWrite: opacity >= 1 });
+      m.resolution.set(this.width, this.height);
+      this.lineMats.push(m);
+      return m;
+    };
+    const lift = Math.max(0.01, 0.002 * R);
+    const segIn = armFaceSeg(stIn, 1, lift), segOut = armFaceSeg(stOut, 1, lift), segC = armFaceSeg(stC, -1, lift);
+    // Both in the transparent pass so renderOrder puts the stripe over its outline.
+    const outline = lineMat('#0a0d12', 7, 0.6), stripe = lineMat(PAL.accent, 3, 0.999);
+    for (const [segs, parent] of [[segIn, this.rotor], [segOut, this.outerPiece], [segC, this.rotor]] as const) {
+      const o = fatLines(segs, outline);
+      o.renderOrder = 3;
+      const l = fatLines(segs, stripe);
+      l.renderOrder = 4;
+      parent.add(o, l);
+    }
 
     // Vehicle on the arm: nose along the tangential direction (-Y at phase 0).
     this.vehicle = new VehicleMesh(v);
@@ -548,21 +727,43 @@ export class LauncherView implements View {
     this.outerPiece.add(this.vehicleOnArm);
     this.machine.add(this.rotor, this.flingPivot);
 
-    // Stroboscopic swept disc (not part of the rotating group).
+    // Speed cues (not part of the rotating group): swept disc, ghost copies of the arm, tip trail.
     const discR = Math.max(R + v.length / 2, Rcw + cwSize);
-    const disc = new THREE.Mesh(
-      new THREE.RingGeometry(hubR, discR, 160, 1),
-      new THREE.MeshBasicMaterial({ color: '#9fb3c8', transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide }),
-    );
-    const trail = new THREE.Mesh(
-      new THREE.RingGeometry(R - v.diameter, R + v.diameter * 1.5, 192, 1),
-      new THREE.MeshBasicMaterial({ color: '#e6edf3', transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide }),
-    );
+    this.discMat = new THREE.MeshBasicMaterial({ color: PAL.disc, transparent: true, opacity: 0.05, depthWrite: false, side: THREE.DoubleSide });
+    const disc = new THREE.Mesh(new THREE.RingGeometry(hubR, discR, 160, 1), this.discMat);
     disc.position.z = 0.02;
-    trail.position.z = 0.03;
-    this.blurDisc.add(disc, trail);
+    disc.renderOrder = 1;
+    this.blurDisc.add(disc);
     this.blurDisc.visible = false;
     this.machine.add(this.blurDisc);
+    // Ghost copies: one straight stroke per arm (no joints, so no beading where strokes overlap).
+    const ghostSegs = [hubR, 0, lift, R + v.length * 0.1, 0, lift, -hubR, 0, lift, -Rcw, 0, lift];
+    const ghostGeo = new LineSegmentsGeometry();
+    ghostGeo.setPositions(ghostSegs);
+    this.ghosts = [];
+    for (let i = 0; i < GHOSTS; i++) {
+      const group = new THREE.Group();
+      const line = lineMat(PAL.smear, 4, 0.3);
+      line.depthWrite = false;
+      const gl = new LineSegments2(ghostGeo, line);
+      gl.frustumCulled = false;
+      gl.layers.set(MAIN_ONLY_LAYER);
+      gl.renderOrder = 2;
+      const mesh = new THREE.MeshBasicMaterial({ color: PAL.counterweight, transparent: true, opacity: 0.3, depthWrite: false });
+      const gcw = new THREE.Mesh(cwGeo, mesh);
+      gcw.position.x = -Rcw;
+      gcw.layers.set(MAIN_ONLY_LAYER);
+      gcw.renderOrder = 2;
+      group.add(gl, gcw);
+      group.visible = false;
+      this.machine.add(group);
+      this.ghosts.push({ group, line, mesh });
+    }
+    this.smearV = new ArcStrip(PAL.smear, 48, 1.8, false, 1);
+    this.smearC = new ArcStrip(PAL.smear, 48, 1.8, false, 1);
+    this.trail = new ArcStrip(PAL.trail, TRAIL_SEGS, 1.5, true, 5);
+    this.smearR = { hub: hubR, v: R, c: Rcw + cwSize * 0.5, z: lift };
+    this.machine.add(this.smearV.mesh, this.smearC.mesh, this.trail.mesh);
 
     // Exit tunnel: from the aperture in the wall (s = sWall) to sEnd.
     const O = this.proj.toSceneV(g.tunnelOrigin, new THREE.Vector3());
@@ -572,8 +773,8 @@ export class LauncherView implements View {
     const tw = Math.max(0.25, ap * 0.7);
     const tq = new THREE.Quaternion().setFromUnitVectors(Y_AXIS, dir);
     const mid = O.clone().addScaledVector(dir, (g.sWall + g.sEnd) / 2);
-    const inner = new THREE.Mesh(new THREE.CylinderGeometry(ap, ap, tLen, 40, 1, true), new THREE.MeshStandardMaterial({ color: '#334055', metalness: 0.4, roughness: 0.6, side: THREE.BackSide }));
-    const outer = new THREE.Mesh(new THREE.CylinderGeometry(ap + tw, ap + tw, tLen, 40, 1, true), new THREE.MeshStandardMaterial({ color: '#7d8a9c', transparent: true, opacity: 0.38, depthWrite: false }));
+    const inner = new THREE.Mesh(new THREE.CylinderGeometry(ap, ap, tLen, 40, 1, true), new THREE.MeshStandardMaterial({ color: PAL.tunnelInner, metalness: 0.4, roughness: 0.6, side: THREE.BackSide }));
+    const outer = new THREE.Mesh(new THREE.CylinderGeometry(ap + tw, ap + tw, tLen, 40, 1, true), new THREE.MeshStandardMaterial({ color: PAL.tunnelOuter, transparent: true, opacity: 0.45, depthWrite: false }));
     for (const m of [inner, outer]) {
       m.position.copy(mid);
       m.quaternion.copy(tq);
@@ -595,7 +796,7 @@ export class LauncherView implements View {
     };
     this.tunnelWallA.setPoints(wallPts(1), IDENTITY);
     this.tunnelWallB.setPoints(wallPts(-1), IDENTITY);
-    this.machine.add(ringAt(g.sEnd, ap + tw * 0.5, '#9aa7b8', Math.max(0.03, ap * 0.06)));
+    this.machine.add(ringAt(g.sEnd, ap + tw * 0.5, PAL.edge, Math.max(0.03, ap * 0.06)));
 
     // Static guides: vehicle circle, release window arc, exit corridor (s = 0 .. sWall).
     this.pathCircle.setPoints(circlePoints(R, 0.05, 256), IDENTITY);
@@ -609,21 +810,22 @@ export class LauncherView implements View {
     const endWall = O.clone().addScaledVector(dir, g.sWall);
     this.corridorLine.setPoints([[O.x, O.y, O.z + 0.12], [endWall.x, endWall.y, endWall.z + 0.12]], IDENTITY);
 
-    // Ground with a subtle grid.
+    // Ground: a plain plane with a sparse, faint grid (it fades into the horizon fog).
     disposeTree(this.ground);
     this.scene.remove(this.ground);
     this.ground = new THREE.Group();
-    const cell = niceStep(Rc / 5);
-    const size = cell * 120;
+    const cell = niceStep(Rc / 2);
+    const size = cell * 64;
     const groundSize = Math.max(size, Rc * 80);
-    const plane = new THREE.Mesh(new THREE.PlaneGeometry(groundSize, groundSize), new THREE.MeshStandardMaterial({ color: '#0f141b', roughness: 1, metalness: 0 }));
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(groundSize, groundSize), new THREE.MeshStandardMaterial({ color: PAL.ground, roughness: 1, metalness: 0 }));
     plane.rotation.x = -Math.PI / 2;
     plane.position.y = yG;
-    const minor = new THREE.GridHelper(size, 120, '#18202a', '#18202a');
-    minor.position.y = yG + 0.02;
-    const major = new THREE.GridHelper(size, 24, '#253141', '#253141');
-    major.position.y = yG + 0.04;
-    this.ground.add(plane, minor, major);
+    const grid = new THREE.GridHelper(size, 16, PAL.grid, PAL.grid);
+    grid.position.y = yG + 0.04;
+    const gm = grid.material as THREE.LineBasicMaterial;
+    gm.transparent = true;
+    gm.opacity = 0.7;
+    this.ground.add(plane, grid);
     this.scene.add(this.ground);
 
     // Fixed labels.
@@ -637,17 +839,27 @@ export class LauncherView implements View {
     };
     addFixed(`VACUUM CHAMBER  Ø ${fmtLen(2 * Rc)} × ${fmtLen(D)} deep\nfront wall cut away`, 'VACUUM CHAMBER', new THREE.Vector3(Rc * 0.45, Rc * 0.92, D / 2), 'muted', [0, 1]);
     addFixed(`HUB · ${fmtInt(sc.rotor.motor.electricalPowerW / 1e6)} MW drive`, null, new THREE.Vector3(0, -hubR * 1.4, D / 2), 'muted', [0.5, 0]);
-    const relPos = new THREE.Vector3(R * Math.cos(g.phiRelease), -R * Math.sin(g.phiRelease), 0);
-    const outward = relPos.x < 0 ? [1.08, 0] as [number, number] : [-0.08, 0] as [number, number];
-    addFixed(`RELEASE POINT\nelevation ${fmtFixed((g.elevation * 180) / Math.PI, 0)}°`, 'RELEASE', relPos, 'release', [outward[0], 0.5]);
-    const tEnd = O.clone().addScaledVector(dir, g.sEnd + 1.5);
-    addFixed(`EXIT TUNNEL ${fmtLen(tLen)}\naperture Ø ${fmtLen(2 * ap)}`, 'EXIT TUNNEL', tEnd, 'muted', [dir.x >= 0 ? 1.08 : -0.08, 0.5]);
+    // Release label outside the rim, on the release radius: clear of the vehicle's path.
+    const relDir = new THREE.Vector3(Math.cos(g.phiRelease), -Math.sin(g.phiRelease), 0);
+    const relLabel = relDir.clone().multiplyScalar(Rc + wallT * 2);
+    relLabel.z = D / 2;
+    addFixed(`RELEASE POINT\nelevation ${fmtFixed((g.elevation * 180) / Math.PI, 0)}°`, 'RELEASE', relLabel, 'release', [0.5, 0.5]);
+    anchorBeyond(relDir, this.fixedLabels[this.fixedLabels.length - 1], 1.12);
+    // Exit tunnel label beside the outer part of the tunnel, on the side away from the hub
+    // (clear of the banner at the top of the view and of the vehicle's path).
+    const sLab = g.sWall + Math.max(0.6 * tLen, Math.min(tLen, Rc * 0.1));
+    const tMid = O.clone().addScaledVector(dir, sLab);
+    const side = new THREE.Vector3(-dir.y, dir.x, 0).normalize();
+    if (side.dot(tMid) < 0) side.multiplyScalar(-1);
+    tMid.addScaledVector(side, (ap + tw) * 1.5);
+    addFixed(`EXIT TUNNEL ${fmtLen(tLen)}\naperture Ø ${fmtLen(2 * ap)}`, 'EXIT TUNNEL', tMid, 'muted', [0.5, 0.5]);
+    anchorBeyond(side, this.fixedLabels[this.fixedLabels.length - 1], 1.1);
     const cwLabel = (this.cwLabel = makeLabel(`COUNTERWEIGHT\n${fmtInt(sc.derived.counterMass)} kg at ${fmtLen(Rcw)}`, 'muted', [0.5, -0.25]));
     cwLabel.position.set(-Rcw, 0, 0);
     this.rotor.add(cwLabel);
     this.fixedLabels.push(cwLabel);
     this.labelTexts.set(cwLabel, { full: cwLabel.element.textContent ?? '', short: 'COUNTERWEIGHT' });
-    const armLabel = makeLabel(`ARM R = ${fmtLen(R)}`, 'muted', [0.5, -0.5]);
+    const armLabel = (this.armLabel = makeLabel(`ARM R = ${fmtLen(R)}`, 'muted', [0.5, -0.5]));
     armLabel.position.set(R * 0.38, 0, 0);
     this.rotor.add(armLabel);
     this.fixedLabels.push(armLabel);
@@ -655,7 +867,7 @@ export class LauncherView implements View {
     this.labelTexts.set(this.vehicleLabel, { full: `VEHICLE ${fmtLen(v.length)} · ${fmtInt(sc.derived.wetMass)} kg`, short: 'VEHICLE' });
     this.applyVariantText();
 
-    this.scene.fog = new THREE.Fog(COLORS.background, Rc * 4, Rc * 14);
+    this.scene.fog = new THREE.Fog(PAL.skyHorizon, Rc * 4, Rc * 14);
     // Keep the user's camera across config edits unless the machine's scale changed a lot.
     if (!(Math.abs(Rc - this.builtRc) <= 0.25 * this.builtRc)) {
       this.builtRc = Rc;
@@ -680,6 +892,7 @@ export class LauncherView implements View {
       this.variant = ctx.variant;
       styleLights(this.lights, this.variant);
       this.flownTrack.setHalo(this.variant === 'play');
+      (this.vehicleGlow.material as THREE.PointsMaterial).size = this.variant === 'play' ? 60 : 42;
     }
     const compact = ctx.variant === 'play' || ctx.width < 640;
     if (compact !== this.compact) {
@@ -704,7 +917,8 @@ export class LauncherView implements View {
     }
     this.controls.enableDamping = !ctx.reducedMotion;
     this.controls.update();
-    applyFraming(this.camera, this.width, this.height, ctx.insets);
+    // Content a little below centre: the banner sits at the top of the view.
+    applyFraming(this.camera, this.width, this.height, ctx.insets, 0, TOP_ROOM / 2);
     this.overlay.layout(ctx.insets, ctx.variant);
     this.fx.group.visible = !!sc;
     if (!sc || !this.vehicle) {
@@ -730,21 +944,26 @@ export class LauncherView implements View {
     const phase = snap?.phase ?? 'idle';
     const sinceRelease = released && Number.isFinite(this.tRelease) ? snap!.t - this.tRelease : Infinity;
     const truePhaseWindow = phase === 'hold' || phase === 'corridor' || sinceRelease < 0.3;
-    const strobe = !!snap && omega > STROBE_OMEGA && !truePhaseWindow;
 
-    // Rotor display angle. After a failure the display coasts to rest from where it was.
-    let phiDisp = snap ? snap.rotor.phi : Math.PI / 2;
-    if (strobe) phiDisp = g.phiRelease - Math.PI / 2 + (ctx.reducedMotion ? 0 : 0.12 * ctx.wall);
+    // Rotor display angle: a perceptual display spin while the playback is time-lapsed, the true
+    // phase (blended in continuously) in hold, the exit corridor and just after release.
+    this.spin.update({
+      wall: ctx.wall, dtWall: ctx.dtWall, snapT: snap ? snap.t : null, phi: snap ? snap.rotor.phi : Math.PI / 2,
+      omega, truePhase: truePhaseWindow, reduced: ctx.reducedMotion,
+    });
+    let phiDisp = snap ? this.spin.angle : Math.PI / 2;
+    let drawnRate = snap ? Math.max(0, this.spin.rate) : 0;
     const fstate = this.fxClock.sync(snap, ctx.dtWall);
     if (fstate === 'start' || fstate === 'reset') this.resetFailure();
-    if (this.fail) phiDisp = this.fail.phi0 + this.fail.omegaEff * COAST_TAU * (1 - Math.exp(-this.fxClock.t / COAST_TAU));
-    this.rotor.rotation.z = -phiDisp;
-    this.blurDisc.visible = strobe && !ctx.reducedMotion && !snap?.failure;
-    if (this.blurDisc.visible) {
-      const k = Math.min(1, omega / 40);
-      ((this.blurDisc.children[0] as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = 0.06 + 0.08 * k;
-      ((this.blurDisc.children[1] as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = 0.14 + 0.18 * k;
+    // After a machine failure the display coasts to rest from where it was; failures elsewhere leave the rotor turning.
+    const coasting = !!this.fail && !this.fail.rotorFree;
+    if (this.fail && coasting) {
+      const e = Math.exp(-this.fxClock.t / COAST_TAU);
+      phiDisp = this.fail.phi0 + this.fail.omegaEff * COAST_TAU * (1 - e);
+      drawnRate = this.fail.omegaEff * e;
     }
+    this.rotor.rotation.z = -phiDisp;
+    const synthetic = !!snap && this.spin.synthetic && !coasting;
     const ballastGone = released && sc.release.balance.releasesBallast;
     if (this.counterBlock) this.counterBlock.visible = !ballastGone;
 
@@ -787,21 +1006,26 @@ export class LauncherView implements View {
 
     // Failure effects (wall clock from the first frame the failure is seen).
     if (fstate === 'start' && snap?.failure) {
-      this.beginFailure(ctx, sc, snap, phiDisp, strobe, released, vehPos, vehVelDir, speed);
+      this.beginFailure(ctx, sc, snap, phiDisp, drawnRate, released, vehPos, vehVelDir, speed);
       this.resumeStill = false;
     }
     if (this.fail) this.updateFailure(ctx, sc);
     const fail = this.fail;
     const vehicleLost = !!fail && (fail.vehicleGone || fail.fling !== null);
 
-    // Force overlays.
+    // Speed cues, growing with the TRUE rotor speed: swept disc, smear of the arm, trail at the tip.
+    this.updateSpeedCues(ctx, sc, snap, phiDisp, drawnRate, released, ballastGone, vehPos, !!fail && !fail.rotorFree);
+
+    // Force overlays (arrows ride on the vehicle; their labels only while it turns slowly enough to read).
     const showForces = ctx.overlays.forces && !!snap && speed > 0.01 && !snap.failure;
     const awayDist = vehPos.length();
     const near = awayDist < g.sEnd + g.chamberRadius * 0.6;
-    this.vArrow.group.visible = showForces && near;
-    this.aArrow.group.visible = showForces && !released;
-    this.vLabel.visible = this.vArrow.group.visible;
-    this.aLabel.visible = this.aArrow.group.visible;
+    const slowArm = released || drawnRate < ARROW_SPIN_MAX;
+    const armArrows = slowArm || (ctx.variant === 'engineer' && truePhaseWindow);
+    this.vArrow.group.visible = showForces && near && armArrows;
+    this.aArrow.group.visible = showForces && !released && armArrows;
+    this.vLabel.visible = this.vArrow.group.visible && slowArm;
+    this.aLabel.visible = this.aArrow.group.visible && slowArm;
     if (this.vArrow.group.visible) {
       const len = R * 0.24, rad = Math.max(0.05, R * 0.0045);
       this.vArrow.set(vehPos, vehVelDir, len, rad);
@@ -841,17 +1065,25 @@ export class LauncherView implements View {
     this.awayLabel.visible = far;
     vm.group.visible = !fail?.vehicleGone;
     if (far && veh) {
+      // At the tunnel mouth, on the hub side (the tunnel label sits on the outer side).
       const O = this.proj.toSceneV(g.tunnelOrigin, _v);
       const dir = this.proj.dirToScene(g.tunnelDir, _v2).normalize();
-      this.awayLabel.position.copy(O).addScaledVector(dir, g.sEnd + g.chamberRadius * 0.25);
+      const pos = this.awayLabel.position.copy(O).addScaledVector(dir, g.sEnd);
+      const side = _v3.set(-dir.y, dir.x, 0).normalize();
+      if (side.dot(pos) > 0) side.multiplyScalar(-1);
+      pos.addScaledVector(side, g.apertureRadius * 3 + g.chamberRadius * 0.03);
+      anchorBeyond(side, this.awayLabel, 1.1);
       setLabelText(
         this.awayLabel,
         fail?.vehicleGone ? `vehicle lost at ${fmtKm(veh.altitude)} altitude` : `vehicle ↗ ${fmtKm(veh.altitude)} altitude · ${fmtInt(speed)} m/s\nsee World view`,
       );
     }
-    this.vehicleLabel.visible = !far && ctx.overlays.labels && !vehicleLost;
-    if (this.cwLabel) this.cwLabel.visible = this.labelShown(this.cwLabel, ctx.overlays.labels) && !(released && sc.release.balance.releasesBallast);
-    this.vehicleGlow.visible = this.variant === 'play' && !far && !vehicleLost;
+    // Labels riding on the rotor are hidden while it turns (a label racing round is unreadable).
+    const turning = drawnRate > LABEL_SPIN_MAX;
+    this.vehicleLabel.visible = !far && ctx.overlays.labels && !vehicleLost && (released || !turning);
+    if (this.cwLabel) this.cwLabel.visible = this.labelShown(this.cwLabel, ctx.overlays.labels) && !ballastGone && !turning;
+    if (this.armLabel) this.armLabel.visible = this.labelShown(this.armLabel, ctx.overlays.labels) && !turning;
+    this.vehicleGlow.visible = !far && !vehicleLost;
     setDot(this.vehicleGlow, vehPos);
     this.vehicleRing.visible = !far && !vehicleLost;
     setDot(this.vehicleRing, vehPos);
@@ -861,8 +1093,53 @@ export class LauncherView implements View {
     anchorBeyond(outward.lengthSq() > 0 ? outward.normalize() : outward.set(0, -1, 0), this.vehicleLabel, 1.4);
 
     this.updateInset(!far && !vehicleLost, vehPos, sc);
-    this.updateText(snap, sc, strobe, released, sinceRelease, ctx.variant);
+    this.updateText(snap, sc, synthetic, drawnRate, released, sinceRelease, ctx.variant);
     this.overlay.setScale(ppu);
+  }
+
+  /**
+   * Speed cues for the spinning rotor, all scaled by the TRUE speed (tanh(omega / SPIN_REF)):
+   * a faint swept disc, fading ghost copies of the arm and counterweight trailing the drawn arm
+   * (spread = drawn rate x a ~75 ms exposure), and a bright arc behind the vehicle at the tip.
+   * No smear or trail with reduced motion; none while a broken machine coasts down.
+   */
+  private updateSpeedCues(
+    ctx: FrameContext, sc: Scenario, snap: Snapshot | null, phiDisp: number, rate: number, released: boolean, ballastGone: boolean,
+    vehPos: THREE.Vector3, broken: boolean,
+  ): void {
+    const k = snap && !broken ? speedCue(snap.rotor.omega) : 0;
+    const cues = k > 0.02;
+    this.blurDisc.visible = cues;
+    if (this.discMat) this.discMat.opacity = 0.025 + 0.085 * k * k;
+    const smear = cues && !ctx.reducedMotion && rate > 0.4;
+    // Exposure of the "camera": the smear covers the angle swept in ~80 ms (or one slow frame).
+    const spread = Math.min(1.4, rate * Math.max(0.08, Math.min(this.spin.frameTime, 0.25)));
+    for (let i = 0; i < this.ghosts.length; i++) {
+      const gh = this.ghosts[i];
+      gh.group.visible = smear;
+      if (!smear) continue;
+      gh.group.rotation.z = -(phiDisp - (spread * (i + 1)) / (this.ghosts.length + 1));
+      const a = k * 0.4 * Math.pow(1 - (i + 1) / (this.ghosts.length + 1), 1.2);
+      gh.line.opacity = a;
+      gh.mesh.opacity = ballastGone ? 0 : a * 0.8;
+    }
+    const sr = this.smearR;
+    for (const [st, r1, sign] of [[this.smearV, sr.v, 1], [this.smearC, sr.c, -1]] as const) {
+      if (!st) continue;
+      st.mesh.visible = smear && !(sign < 0 && ballastGone);
+      if (!st.mesh.visible) continue;
+      st.set(phiDisp, spread * 1.15, sr.hub, r1, sr.z * 0.5, sign);
+      st.material.opacity = 0.3 * k;
+    }
+    const trail = this.trail;
+    if (!trail) return;
+    trail.mesh.visible = smear && !released;
+    if (!trail.mesh.visible) return;
+    const R = sc.geometry.armRadius;
+    // Constant-ish on screen: at least ~8 px wide, never thinner than the vehicle.
+    const w = Math.max(sc.vehicle.diameter * 1.4, 8 * this.mpp(vehPos));
+    trail.set(phiDisp, Math.min(1.7 * Math.PI, rate * 0.2), R - w / 2, R + w / 2, sr.z);
+    trail.material.opacity = Math.min(1, 0.3 + 0.8 * k);
   }
 
   // ------------------------------------------------------------------ failure effects
@@ -900,27 +1177,30 @@ export class LauncherView implements View {
   }
 
   private beginFailure(
-    ctx: FrameContext, sc: Scenario, snap: Snapshot, phi0: number, strobe: boolean, released: boolean,
+    ctx: FrameContext, sc: Scenario, snap: Snapshot, phi0: number, drawnRate: number, released: boolean,
     vehPos: THREE.Vector3, vehVelDir: THREE.Vector3, speed: number,
   ): void {
     const kind = String(snap.failure?.kind ?? '');
     const still = ctx.reducedMotion || this.resumeStill;
     const { Rc } = this.dims;
+    // A failure away from the machine (in flight, at the exit) leaves the released rotor coasting as drawn.
+    const rotorFree = released && !isMachineFailure(kind);
     const fail: LauncherFailure = {
       kind, still, phi0, omegaEff: 0, slow: null, vehicleGone: false, fling: null, jitter: 0, jitterT: 0, crumple: false,
       hubSparksUntil: 0, sparkAcc: 0, pending: [], flightAnchor: null, tumble: false, heatUntil: 0, phaseStart: 0, gD: 0.3 * Rc,
+      rotorFree,
     };
     this.fail = fail;
     this.fx.seed(failureSeed(snap));
     this.fx.collider = this.chamberCollider;
     this.fx.restSpeed = 0.03 * Rc;
     const omega = snap.rotor.omega;
-    // Without a failure-specific motion the display coasts from the strobe drift (or true rate) to rest.
-    fail.omegaEff = still ? 0 : strobe ? 0.12 : 0;
+    // Without a failure-specific motion the display coasts to rest from the rate it was drawn at.
+    fail.omegaEff = still ? 0 : drawnRate;
     if (!released) {
       if (kind === 'structural-limit') return this.beginArmBreak(fail, sc, omega);
       if (kind === 'component-load') return this.beginCrush(fail, sc, omega, vehPos);
-      if (kind === 'drive-stall') return this.beginStall(fail, omega, strobe);
+      if (kind === 'drive-stall') return this.beginStall(fail);
     }
     if (kind === 'bearing-envelope') return this.beginBearing(fail);
     if (kind === 'drive-stall' || isQuietFailure(kind)) return;
@@ -1117,8 +1397,8 @@ export class LauncherView implements View {
   }
 
   /** Drive too weak: no break-up. The rotor coasts to rest; a faint wisp of smoke and heat at the drive. */
-  private beginStall(fail: LauncherFailure, omega: number, strobe: boolean): void {
-    fail.omegaEff = fail.still ? 0 : strobe ? 0.12 : Math.min(omega, STROBE_OMEGA);
+  private beginStall(fail: LauncherFailure): void {
+    // The rotor coasts down from the speed it was drawn at (omegaEff set by beginFailure).
     if (fail.still) return;
     const { D, hubR } = this.dims;
     this.fx.collider = null;
@@ -1252,7 +1532,9 @@ export class LauncherView implements View {
     this.fx.update(dt);
   }
 
-  private updateText(snap: Snapshot | null, sc: Scenario, strobe: boolean, released: boolean, sinceRelease: number, variant: 'engineer' | 'play'): void {
+  private updateText(
+    snap: Snapshot | null, sc: Scenario, synthetic: boolean, drawnRate: number, released: boolean, sinceRelease: number, variant: 'engineer' | 'play',
+  ): void {
     if (!snap) {
       this.overlay.setCaption('LAUNCHER · cutaway', `at rest · target ${fmtInt(sc.derived.tipSpeed)} m/s tip speed, ${fmtFixed(sc.derived.rpm, 1)} rpm`);
       this.overlay.setBanner(null);
@@ -1265,19 +1547,27 @@ export class LauncherView implements View {
     let detail = parts.join(' · ');
     const slow = this.fail && !this.fail.still ? this.fail.slow : null;
     if (slow && Number.isFinite(slow) && slow > 1.5 && this.fxClock.t < 4) detail += `\nSLOW MOTION · debris shown at ≈ 1/${fmtInt(niceRound(slow))} of real speed`;
+    const play = variant === 'play';
+    // Honest labelling of the synthetic display spin (the drawn arm turns slower than the real one).
+    const spinNote = synthetic && r.omega > 0.05;
+    if (spinNote) {
+      detail += `\nspin drawn at ${fmtFixed(drawnRate / (2 * Math.PI), 1)} rev/s for the eye · real ${fmtFixed(r.rpm / 60, 1)} rev/s`;
+    }
     this.overlay.setCaption('LAUNCHER · cutaway', detail);
     if (snap.failure) {
       // 'play': the game HUD tells the story; the engineer banner stays short.
-      this.overlay.setBanner(variant === 'play' ? null : `FAILURE — ${snap.failure.criterion}`, 'warn');
-    } else if (strobe) {
-      this.overlay.setBanner(
-        `STROBOSCOPIC VIEW — actual rotor ${fmtFixed(r.rpm, 1)} rpm (ω ${fmtFixed(r.omega, 1)} rad/s)\narm drawn at strobe flashes; it is not slowing down`,
-        'strobe',
-      );
+      this.overlay.setBanner(play ? null : `FAILURE — ${snap.failure.criterion}`, 'warn');
     } else if (released && sinceRelease < 0.3) {
-      this.overlay.setBanner(`RELEASED — true phase, t + ${fmtFixed(sinceRelease * 1000, 1)} ms`, 'info');
+      this.overlay.setBanner(play ? 'RELEASED · true speed, slow motion' : `RELEASED — true phase, t + ${fmtFixed(sinceRelease * 1000, 1)} ms`, 'info');
     } else if (snap.phase === 'hold' || snap.phase === 'corridor') {
-      this.overlay.setBanner(`TRUE PHASE — ${PHASE_NAME[snap.phase]} (playback slowed)`, 'info');
+      this.overlay.setBanner(play ? `${snap.phase === 'hold' ? 'HOLD' : 'RELEASE'} · true spin, slow motion` : `TRUE PHASE — ${PHASE_NAME[snap.phase]} (playback slowed)`, 'info');
+    } else if (spinNote) {
+      this.overlay.setBanner(
+        play
+          ? `spin shown slowed · real ${fmtInt(r.rpm)} rpm`
+          : `SPIN SHOWN SLOWED (time-lapse) — real rotor ${fmtInt(r.rpm)} rpm · tip ${fmtInt(r.tipSpeed)} m/s`,
+        'note',
+      );
     } else {
       this.overlay.setBanner(null);
     }

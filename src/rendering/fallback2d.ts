@@ -12,6 +12,7 @@ import { R_EARTH } from '../physics/constants';
 import { type Vec3, cross, dot, norm, rotZ, sub } from '../physics/vec3';
 import { eciRowsToEcef, hasTrajectory } from './projection';
 import { COLORS, fmtFixed, fmtInt, fmtKm, niceStep } from './style';
+import { SpinDisplay, speedCue } from './spin';
 
 interface Profile {
   table: TelemetryTable | null;
@@ -39,6 +40,9 @@ export class Fallback2D implements Renderer {
   private flownP = emptyProfile();
   private predP = emptyProfile();
   private readonly t0 = performance.now();
+  /** Perceptual display spin (time-lapse) / true phase in hold and release, as in the 3D view. */
+  private readonly spin = new SpinDisplay();
+  private spinWall = NaN;
 
   constructor(container: HTMLElement, source: RenderSource) {
     this.container = container;
@@ -202,19 +206,22 @@ export class Fallback2D implements Renderer {
     const fl = this.source.flown();
     const tRel = hasTrajectory(fl) ? fl.get('t', 0) : NaN;
     const trueWindow = snap?.phase === 'hold' || snap?.phase === 'corridor' || (released && snap!.t - tRel < 0.3);
-    const strobe = !!snap && omega > 2 && !trueWindow;
-    let phi = snap ? snap.rotor.phi : Math.PI / 2;
-    if (strobe) {
-      phi = pr - Math.PI / 2 + (this.source.reducedMotion() ? 0 : 0.12 * wall);
-      if (!this.source.reducedMotion()) {
-        g.fillStyle = 'rgba(159,179,200,0.10)';
-        g.beginPath();
-        g.arc(cx, cy, (R + sc.vehicle.length / 2) * s, 0, Math.PI * 2);
-        g.fill();
-      }
+    const dtWall = Number.isFinite(this.spinWall) ? Math.max(0, wall - this.spinWall) : 0;
+    this.spinWall = wall;
+    this.spin.update({
+      wall, dtWall, snapT: snap ? snap.t : null, phi: snap ? snap.rotor.phi : Math.PI / 2, omega, truePhase: trueWindow, reduced: this.source.reducedMotion(),
+    });
+    const synthetic = !!snap && this.spin.synthetic && omega > 0.05;
+    const phi = snap ? this.spin.angle : Math.PI / 2;
+    const cue = snap && !snap.failure ? speedCue(omega) : 0;
+    if (cue > 0.02) {
+      g.fillStyle = `rgba(169,189,212,${(0.03 + 0.1 * cue * cue).toFixed(3)})`;
+      g.beginPath();
+      g.arc(cx, cy, (R + sc.vehicle.length / 2) * s, 0, Math.PI * 2);
+      g.fill();
     }
     const Rcw = sc.rotor.counterRadius;
-    g.strokeStyle = '#8b949e';
+    g.strokeStyle = '#ff8a3d';
     g.lineWidth = 3;
     g.beginPath();
     g.moveTo(cx - Rcw * Math.cos(phi) * s, cy - Rcw * Math.sin(phi) * s);
@@ -248,9 +255,9 @@ export class Fallback2D implements Renderer {
     g.textBaseline = 'top';
     g.fillText(`chamber Ø ${fmtInt(2 * Rc)} m · arm ${fmtInt(R)} m · elevation ${fmtFixed((geo.elevation * 180) / Math.PI, 0)}°`, x + 4, y + 4);
     if (snap) g.fillText(`${snap.phase} · ${fmtFixed(snap.rotor.rpm, 1)} rpm · tip ${fmtInt(snap.rotor.tipSpeed)} m/s`, x + 4, y + 18);
-    if (strobe) {
+    if (synthetic) {
       g.fillStyle = '#f8e3a1';
-      g.fillText(`STROBOSCOPIC — actual rotor ${fmtFixed(snap!.rotor.rpm, 1)} rpm`, x + 4, y + 32);
+      g.fillText(`spin shown slowed · real ${fmtInt(snap!.rotor.rpm)} rpm`, x + 4, y + 32);
     }
     if (released && !onCanvas && snap?.vehicle) {
       g.fillStyle = '#ffd8a8';

@@ -15,7 +15,9 @@ function makeSource(ctl: Controller, variant: 'engineer' | 'play'): RenderSource
       if (variant !== 'play') return { top: 40, bottom: 0, left: 0, right: 0 };
       const st = ctl.store.get();
       const live = st.run.status === 'live' || st.run.status === 'starting';
-      if (live) return { top: 90, bottom: 80, left: 180, right: 0 };
+      // The flight mini-map (bottom right) is shown on screens at least 760 x 620 (see styles.css).
+      const miniMap = typeof window !== 'undefined' && window.innerWidth > 760 && window.innerHeight > 620;
+      if (live) return { top: 90, bottom: 80, left: 180, right: miniMap ? 300 : 0 };
       if (st.showHome) return { top: 0, bottom: 0, left: 0, right: 0 };
       return { top: 60, bottom: 300, left: 0, right: 0 };
     },

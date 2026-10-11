@@ -41,10 +41,11 @@ const CSS = `
   font:600 12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:.03em;
   color:#e6edf3;background:rgba(13,17,23,.86);border:1px solid rgba(139,148,158,.45);border-radius:4px;
   padding:5px 10px;text-align:center;white-space:pre-wrap}
-.cf-banner--strobe{border-color:rgba(242,204,96,.9);color:#f8e3a1}
 .cf-banner--warn{border-color:rgba(255,92,87,.9);color:#ffc1bf}
 .cf-banner--ok{border-color:rgba(63,185,80,.85);color:#bdf0c5}
 .cf-banner--info{border-color:rgba(76,201,240,.7);color:#c4f1ff}
+.cf-banner--note{font-weight:500;font-size:11px;letter-spacing:.04em;color:#d7dee7;background:rgba(10,13,18,.62);
+  border-color:rgba(255,170,90,.42);padding:3px 10px}
 .cf-caption{position:absolute;top:10px;left:12px;max-width:45%;
   font:500 11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;color:#9da7b3;
   letter-spacing:.04em;white-space:pre;text-transform:none}
@@ -112,7 +113,7 @@ export function niceStep(x: number): number {
 
 // ------------------------------------------------------------------ overlay
 
-export type BannerVariant = 'default' | 'strobe' | 'warn' | 'ok' | 'info';
+export type BannerVariant = 'default' | 'warn' | 'ok' | 'info' | 'note';
 
 /** Per-view HTML overlay inside the renderer container. */
 export class Overlay {

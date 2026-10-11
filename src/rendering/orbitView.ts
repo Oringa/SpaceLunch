@@ -17,6 +17,7 @@ import { type Vec3, cross, norm, normalize, rotZ, scale } from '../physics/vec3'
 import { Projection, disposeTree, eciRows, hasTrajectory, pxPerUnit } from './projection';
 import { Track, type RowMapper } from './track';
 import { createEarthGeometry, createEarthMaterial, createShellMaterial, setGraticule } from './earth';
+import { GeoLayer } from './geoLayer';
 import { COLORS, Overlay, type BannerVariant, fmtInt, fmtKm, makeLabel, setLabelText } from './style';
 import { type FrameContext, type View, applyFraming, makeDot, makeGlow, makeRing, setDot, usableFraction } from './viewBase';
 import { maxRow } from './worldView';
@@ -47,6 +48,9 @@ export class OrbitView implements View {
   private readonly proj = new Projection();
   private readonly earthMat = createEarthMaterial(0.35);
   private readonly earth: THREE.Mesh;
+  /** Coastlines, borders and land tint (loaded lazily), turning with the Earth. */
+  private readonly geo: GeoLayer;
+  private geoSite = '';
   private readonly shell: THREE.Mesh;
   private readonly labels = new THREE.Group();
   private readonly siteDot = makeDot('#e6edf3', 6);
@@ -105,7 +109,9 @@ export class OrbitView implements View {
       new THREE.MeshBasicMaterial({ color: COLORS.band, transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide }),
     );
     this.bandFill.renderOrder = 1;
-    this.scene.add(this.earth, this.shell, this.plane, this.bandFill);
+    // Never closer than ~190 km altitude here: 0.1 deg (~11 km) line steps are plenty.
+    this.geo = new GeoLayer([this.earthMat], 0.1);
+    this.scene.add(this.earth, this.geo.group, this.shell, this.plane, this.bandFill);
     this.scene.add(this.flownTrack.object, this.predictedTrack.object, this.conicTrack.object, this.bandInner.object, this.bandOuter.object);
     this.scene.add(this.siteDot, this.apDot, this.peDot, this.vehicleDot, this.cursorRing, this.vehicleGlow, this.goalRing.object);
     this.labels.add(this.siteLabel, this.apLabel, this.peLabel, this.bandLabel, this.vehicleLabel, this.goalLabel);
@@ -214,8 +220,16 @@ export class OrbitView implements View {
     const ppu = pxPerUnit(this.camera, camDist, this.height);
 
     // Earth rotated by the Earth angle (ECEF -> ECI is rotZ(+angle)).
-    this.proj.place(this.earth, [0, 0, 0], new THREE.Quaternion().setFromAxisAngle(Z_AXIS, ang));
+    const earthQ = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, ang);
+    this.proj.place(this.earth, [0, 0, 0], earthQ);
     setGraticule(this.earthMat, camDist / KM - R_EARTH);
+    this.proj.place(this.geo.group, [0, 0, 0], earthQ);
+    const siteKey = sc ? sc.geometry.hubEcef.join(',') : '';
+    if (sc && siteKey !== this.geoSite) {
+      this.geoSite = siteKey;
+      this.geo.setSite(normalize(sc.geometry.hubEcef), 0);
+    }
+    this.geo.update(camDist / KM - R_EARTH, KM);
     this.proj.place(this.shell, [0, 0, 0]);
     this.shell.visible = ctx.overlays.atmosphere;
 
@@ -450,6 +464,7 @@ export class OrbitView implements View {
     this.controls.dispose();
     this.breakup.dispose();
     for (const t of this.allTracks()) t.dispose();
+    this.geo.dispose();
     disposeTree(this.scene);
     this.earthMat.dispose();
     this.overlay.dispose();
